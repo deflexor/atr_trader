@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "pypsik",
+  "project_id": "17ee83bb-dfc2-4744-828b-370e8f08162b"
+}

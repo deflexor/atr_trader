@@ -1,0 +1,48 @@
+# Base configuration for algo trading bot
+
+trading:
+  exchanges:
+    - kucoin
+    - bybit
+  pairs:
+    - BTC-USDT
+    - ETH-USDT
+  timeframes:
+    - 1m
+    - 5m
+    - 15m
+
+websocket:
+  kucoin:
+    ws_url: "wss://ws-api.kucoin.com/endpoint"
+    rest_url: "https://api.kucoin.com"
+    ping_interval: 30
+  bybit:
+    ws_url: "wss://stream.bybit.com/v5/public/spot"
+    rest_url: "https://api.bybit.com"
+
+database:
+  path: "data/trading.db"
+
+risk:
+  max_position_size: 0.02
+  stop_loss: 0.01
+  take_profit: 0.02
+  max_drawdown: 0.05
+
+strategy:
+  pyramid_entries: 2
+  entry_spacing: 0.005
+  volatility_filter: 0.02
+  max_parallel: 2
+
+ml:
+  feature_window: 60
+  horizon: 5
+  hidden_dims: [128, 64, 32]
+
+backtest:
+  initial_capital: 10000
+  commission: 0.001
+  slippage_type: "volume"
+  slippage_factor: 0.0005

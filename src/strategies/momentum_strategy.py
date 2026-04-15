@@ -1,7 +1,13 @@
 """Momentum trading strategy.
 
-Enters positions based on momentum indicators (RSI, MACD, price momentum).
-Follows the trend - buys on strength, sells on weakness.
+Actual momentum: buys when price is trending UP with strength,
+sells when price is trending DOWN with strength.
+
+Uses:
+- EMA crossover for trend direction
+- RSI for trend strength (not overbought/oversold)
+- MACD histogram for momentum acceleration
+- Volume confirmation
 """
 
 from __future__ import annotations
@@ -20,27 +26,47 @@ from ..core.models.market_data import MarketData
 class MomentumConfig(StrategyConfig):
     """Configuration for momentum strategy."""
 
+    ema_fast: int = 9
+    ema_slow: int = 21
     rsi_period: int = 14
-    rsi_overbought: float = 70.0
-    rsi_oversold: float = 30.0
+    rsi_bullish_min: float = 50.0  # RSI above 50 = bullish momentum
+    rsi_bearish_max: float = 50.0  # RSI below 50 = bearish momentum
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    momentum_threshold: float = 0.02
+    momentum_threshold: float = 0.005  # 0.5% move to confirm momentum
+    min_agreement: int = 3  # Minimum indicators that must agree (of 5)
+
+    # Pullback / patience settings
+    pullback_enabled: bool = True  # Wait for pullback within trend
+    pullback_lookback: int = 10  # Look back N candles for the recent extreme
+    pullback_retrace_min: float = 0.003  # Must have retraced at least 0.3% from extreme
+    rsi_divergence_enabled: bool = True  # Skip when RSI diverges from price
+    rsi_divergence_lookback: int = 5  # Candles to check for divergence
+    entry_candle_required: bool = True  # Require bullish/bearish entry candle
 
 
 class MomentumStrategy(BaseStrategy):
-    """Momentum-based trading strategy.
+    """Trend-following momentum strategy.
 
-    Generates signals based on:
-    - RSI (overbought/oversold)
-    - MACD (trend direction)
-    - Price momentum (rate of change)
+    Genuine momentum: aligns multiple trend indicators.
+    Goes LONG when: EMA fast > slow AND RSI > 50 AND MACD histogram positive
+    Goes SHORT when: EMA fast < slow AND RSI < 50 AND MACD histogram negative
     """
 
     def __init__(self, config: Optional[MomentumConfig] = None):
         super().__init__(config or MomentumConfig(name="momentum"))
         self.momentum_config = config or MomentumConfig(name="momentum")
+
+    def calculate_ema(self, prices: list[float], period: int) -> Optional[float]:
+        """Calculate EMA value."""
+        if len(prices) < period:
+            return None
+        multiplier = 2 / (period + 1)
+        ema = sum(prices[:period]) / period
+        for price in prices[period:]:
+            ema = (price - ema) * multiplier + ema
+        return ema
 
     def calculate_rsi(self, prices: list[float], period: int = 14) -> Optional[float]:
         """Calculate RSI indicator."""
@@ -71,8 +97,7 @@ class MomentumStrategy(BaseStrategy):
         if len(prices) < slow + signal:
             return None
 
-        # Calculate EMAs
-        def ema(data: list[float], period: int) -> list[float]:
+        def ema_series(data: list[float], period: int) -> list[float]:
             if not data:
                 return []
             multiplier = 2 / (period + 1)
@@ -81,11 +106,11 @@ class MomentumStrategy(BaseStrategy):
                 result.append((price - result[-1]) * multiplier + result[-1])
             return result
 
-        ema_fast = ema(prices, fast)
-        ema_slow = ema(prices, slow)
+        ema_fast = ema_series(prices, fast)
+        ema_slow = ema_series(prices, slow)
 
         macd_line = [ema_fast[i] - ema_slow[i] for i in range(len(ema_slow))]
-        signal_line = ema(macd_line, signal)
+        signal_line = ema_series(macd_line, signal)
 
         if len(macd_line) < signal or len(signal_line) < 1:
             return None
@@ -99,13 +124,130 @@ class MomentumStrategy(BaseStrategy):
             return 0.0
         return (prices[-1] - prices[-period]) / prices[-period]
 
+    def _volume_trend(self, candles: CandleSeries, lookback: int = 20) -> float:
+        """Check if volume is increasing in trend direction.
+
+        Returns positive if volume supports upward moves, negative for downward.
+        """
+        if len(candles.candles) < lookback:
+            return 0.0
+
+        recent = candles.candles[-lookback:]
+        up_volume = sum(c.volume for c in recent if c.close > c.open)
+        down_volume = sum(c.volume for c in recent if c.close <= c.open)
+        total = up_volume + down_volume
+
+        if total == 0:
+            return 0.0
+        return (up_volume - down_volume) / total
+
+    def _check_pullback(
+        self,
+        closes: list[float],
+        ema_fast: float,
+        is_long: bool,
+        lookback: int,
+        retrace_min: float,
+    ) -> bool:
+        """Check if price has pulled back within a confirmed trend.
+
+        Verifies two conditions:
+        1. A recent extreme (high for longs, low for shorts) existed above/below current price
+        2. Current price has retraced toward the fast EMA from that extreme
+
+        This prevents entering at the TOP of a momentum push — we wait for a dip.
+        """
+        if len(closes) < lookback + 1:
+            return True  # Not enough data, don't block
+
+        recent = closes[-lookback:]
+        current_price = closes[-1]
+
+        if is_long:
+            recent_high = max(recent)
+            # Must have pulled back from recent high
+            retraced = (recent_high - current_price) / recent_high
+            # Price should be near or below fast EMA
+            near_ema = current_price <= ema_fast * (1 + retrace_min)
+            return retraced >= retrace_min and near_ema
+        else:
+            recent_low = min(recent)
+            # Must have bounced from recent low
+            retraced = (current_price - recent_low) / recent_low
+            # Price should be near or above fast EMA
+            near_ema = current_price >= ema_fast * (1 - retrace_min)
+            return retraced >= retrace_min and near_ema
+
+    def _check_rsi_divergence(
+        self,
+        closes: list[float],
+        rsi: float,
+        lookback: int,
+        is_long: bool,
+    ) -> bool:
+        """Detect RSI divergence: momentum weakening against price direction.
+
+        Returns True if divergence is detected (should SKIP entry).
+        For longs: price rising but RSI falling = bearish divergence.
+        For shorts: price falling but RSI rising = bullish divergence.
+        """
+        if len(closes) < lookback + 1:
+            return False  # Not enough data
+
+        prev_rsi = self.calculate_rsi(closes[:-1], self.momentum_config.rsi_period)
+        if prev_rsi is None:
+            return False
+
+        price_change = closes[-1] - closes[-lookback]
+
+        if is_long:
+            # Bearish divergence: price rising but RSI dropping
+            if price_change > 0 and rsi < prev_rsi:
+                return True
+        else:
+            # Bullish divergence: price falling but RSI rising
+            if price_change < 0 and rsi > prev_rsi:
+                return True
+
+        return False
+
+    def _check_entry_candle(self, candles: CandleSeries, is_long: bool) -> bool:
+        """Validate the current entry candle direction matches trade direction.
+
+        For longs: current candle must be bullish (close > open).
+        For shorts: current candle must be bearish (close < open).
+        """
+        if not candles.candles:
+            return False
+
+        current = candles.candles[-1]
+        if is_long:
+            return current.close > current.open
+        else:
+            return current.close < current.open
+
+    def _previous_candle_level(self, candles: CandleSeries, is_long: bool) -> Optional[float]:
+        """Get previous candle low (for longs) or high (for shorts) as entry threshold.
+
+        Returns None if not enough candles available.
+        """
+        if len(candles.candles) < 2:
+            return None
+
+        prev = candles.candles[-2]
+        return prev.low if is_long else prev.high
+
     async def generate_signal(
         self,
         symbol: str,
         candles: CandleSeries,
         market_data: Optional[MarketData] = None,
     ) -> Signal:
-        """Generate momentum-based trading signal."""
+        """Generate momentum-based trading signal.
+
+        Real momentum: multiple indicators agree on direction.
+        Requires strong consensus before trading.
+        """
         if len(candles.candles) < 50:
             return Signal(
                 symbol=symbol,
@@ -117,65 +259,110 @@ class MomentumStrategy(BaseStrategy):
             )
 
         closes = candles.closes
-        rsi = self.calculate_rsi(closes, self.momentum_config.rsi_period)
-        macd = self.calculate_macd(
-            closes,
-            self.momentum_config.macd_fast,
-            self.momentum_config.macd_slow,
-            self.momentum_config.macd_signal,
-        )
+        cfg = self.momentum_config
+
+        # Calculate indicators
+        ema_fast = self.calculate_ema(closes, cfg.ema_fast)
+        ema_slow = self.calculate_ema(closes, cfg.ema_slow)
+        rsi = self.calculate_rsi(closes, cfg.rsi_period)
+        macd = self.calculate_macd(closes, cfg.macd_fast, cfg.macd_slow, cfg.macd_signal)
         momentum = self.calculate_momentum(closes, 10)
+        vol_trend = self._volume_trend(candles)
 
-        # Calculate signal strength
-        direction = SignalDirection.NEUTRAL
-        strength = 0.0
-        confidence = 0.0
-
-        signals_triggered = 0
+        # Score each indicator: +1 for bullish, -1 for bearish
+        bull_votes = 0
+        bear_votes = 0
         total_indicators = 0
 
-        # RSI analysis
+        # EMA trend: fast above slow = bullish
+        if ema_fast is not None and ema_slow is not None:
+            total_indicators += 1
+            if ema_fast > ema_slow:
+                bull_votes += 1
+            elif ema_fast < ema_slow:
+                bear_votes += 1
+
+        # RSI: above 50 = bullish momentum (NOT overbought/oversold)
         if rsi is not None:
             total_indicators += 1
-            if rsi < self.momentum_config.rsi_oversold:
-                signals_triggered += 1
-            elif rsi > self.momentum_config.rsi_overbought:
-                signals_triggered -= 1
+            if rsi > cfg.rsi_bullish_min:
+                bull_votes += 1
+            elif rsi < cfg.rsi_bearish_max:
+                bear_votes += 1
 
-        # MACD analysis
+        # MACD: histogram positive and rising = bullish
         if macd is not None:
             total_indicators += 1
             macd_line, signal_line, histogram = macd
             if histogram > 0 and macd_line > signal_line:
-                signals_triggered += 1
+                bull_votes += 1
             elif histogram < 0 and macd_line < signal_line:
-                signals_triggered -= 1
+                bear_votes += 1
 
-        # Momentum analysis
-        if abs(momentum) > self.momentum_config.momentum_threshold:
+        # Price momentum: positive ROC = bullish
+        if abs(momentum) > cfg.momentum_threshold:
             total_indicators += 1
             if momentum > 0:
-                signals_triggered += 1
+                bull_votes += 1
             else:
-                signals_triggered -= 1
+                bear_votes += 1
 
-        # Calculate direction and strength
-        if signals_triggered > 0:
+        # Volume confirmation
+        if abs(vol_trend) > 0.1:
+            total_indicators += 1
+            if vol_trend > 0:
+                bull_votes += 1
+            else:
+                bear_votes += 1
+
+        # Determine direction: require minimum agreement
+        direction = SignalDirection.NEUTRAL
+        strength = 0.0
+        confidence = 0.0
+        is_long = False
+
+        if bull_votes >= cfg.min_agreement and bull_votes > bear_votes:
             direction = SignalDirection.LONG
-            strength = (
-                min(1.0, signals_triggered / total_indicators) if total_indicators > 0 else 0.5
-            )
-        elif signals_triggered < 0:
+            strength = min(1.0, bull_votes / max(total_indicators, 1))
+            confidence = bull_votes / max(total_indicators, 1)
+            is_long = True
+        elif bear_votes >= cfg.min_agreement and bear_votes > bull_votes:
             direction = SignalDirection.SHORT
-            strength = (
-                min(1.0, abs(signals_triggered) / total_indicators) if total_indicators > 0 else 0.5
-            )
+            strength = min(1.0, bear_votes / max(total_indicators, 1))
+            confidence = bear_votes / max(total_indicators, 1)
 
-        confidence = abs(signals_triggered) / total_indicators if total_indicators > 0 else 0.0
+        # --- Pullback / patience filters ---
+        if direction != SignalDirection.NEUTRAL:
+            # 1. Pullback: wait for price to dip toward fast EMA
+            if cfg.pullback_enabled and ema_fast is not None:
+                if not self._check_pullback(
+                    closes, ema_fast, is_long, cfg.pullback_lookback, cfg.pullback_retrace_min
+                ):
+                    direction = SignalDirection.NEUTRAL
+                    strength = 0.0
+                    confidence = 0.0
+
+            # 2. RSI divergence: skip if momentum weakening
+            if (
+                direction != SignalDirection.NEUTRAL
+                and cfg.rsi_divergence_enabled
+                and rsi is not None
+            ):
+                if self._check_rsi_divergence(closes, rsi, cfg.rsi_divergence_lookback, is_long):
+                    direction = SignalDirection.NEUTRAL
+                    strength = 0.0
+                    confidence = 0.0
+
+            # 3. Entry candle: must match trade direction
+            if direction != SignalDirection.NEUTRAL and cfg.entry_candle_required:
+                if not self._check_entry_candle(candles, is_long):
+                    direction = SignalDirection.NEUTRAL
+                    strength = 0.0
+                    confidence = 0.0
 
         current_price = closes[-1] if closes else 0.0
 
-        return Signal(
+        signal = Signal(
             symbol=symbol,
             exchange=candles.exchange or "kucoin",
             direction=direction,
@@ -184,6 +371,14 @@ class MomentumStrategy(BaseStrategy):
             price=current_price,
             strategy_id=self.config.name,
         )
+
+        # Attach entry level from previous candle for execution layer
+        if direction != SignalDirection.NEUTRAL:
+            entry_level = self._previous_candle_level(candles, is_long)
+            if entry_level is not None:
+                signal.features = {"entry_level": entry_level}
+
+        return signal
 
     def calculate_position_size(
         self,
@@ -195,13 +390,9 @@ class MomentumStrategy(BaseStrategy):
         if signal.direction == SignalDirection.NEUTRAL:
             return 0.0
 
-        # Risk-based sizing
         risk_amount = portfolio_value * risk_per_trade
-
-        # Use signal strength for position sizing
         adjusted_risk = risk_amount * signal.strength
 
-        # Calculate quantity based on approximate price
         if signal.price > 0:
             return adjusted_risk / signal.price
 

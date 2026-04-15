@@ -189,7 +189,7 @@ class TradingSystem:
                     output_size=1,
                     learning_rate=0.001,
                     batch_size=256,
-                    epochs=50,  # Reduced for demo, can increase
+                    epochs=10,  # Reduced for faster iteration
                 ),
             )
         )

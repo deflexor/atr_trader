@@ -166,7 +166,7 @@ class BacktestEngine:
             winning_trades=len(winning),
             losing_trades=len(losing),
             avg_win=sum(t["pnl"] for t in winning) / len(winning) if winning else 0,
-            avg_loss=sum(t["pnl"] for t in losing) / len(losing) if losing else 0,
+            avg_loss=sum(t.get("pnl", 0) for t in losing) / len(losing) if losing else 0,
             avg_trade_return=total_return / len(self.trades) if self.trades else 0,
             equity_curve=self.equity_curve,
             trades=self.trades,
@@ -188,8 +188,17 @@ class BacktestEngine:
         if len(self.positions) >= self.config.max_positions:
             return
 
+        # Calculate quantity if not set
+        quantity = signal.quantity
+        if quantity <= 0:
+            # Use simple position sizing: risk 1% of capital per trade
+            quantity = (self.capital * 0.01) / signal.price if signal.price > 0 else 0
+
+        if quantity <= 0:
+            return
+
         # Check if we have enough capital
-        if self.capital < signal.price * signal.quantity:
+        if self.capital < signal.price * quantity:
             return
 
         # Calculate fill price with slippage
@@ -204,13 +213,11 @@ class BacktestEngine:
             symbol=signal.symbol,
             exchange=signal.exchange,
             side="long" if signal.direction == SignalDirection.LONG else "short",
-            quantity=signal.quantity,
+            quantity=quantity,
             entry_price=fill_price,
             current_price=fill_price,
             strategy_id=signal.strategy_id,
-            entries=[
-                {"price": fill_price, "quantity": signal.quantity, "timestamp": candle.timestamp}
-            ],
+            entries=[{"price": fill_price, "quantity": quantity, "timestamp": candle.timestamp}],
         )
 
         # Calculate stop loss and take profit
@@ -224,7 +231,7 @@ class BacktestEngine:
         self.positions.append(position)
 
         # Deduct capital (including commission)
-        cost = fill_price * signal.quantity
+        cost = fill_price * quantity
         commission_cost = cost * self.config.commission
         self.capital -= cost + commission_cost
 
@@ -234,7 +241,7 @@ class BacktestEngine:
                 "symbol": signal.symbol,
                 "side": signal.direction.value,
                 "entry_price": fill_price,
-                "quantity": signal.quantity,
+                "quantity": quantity,
                 "commission": commission_cost,
                 "signal_strength": signal.strength,
             }

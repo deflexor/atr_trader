@@ -105,7 +105,7 @@ class TradingSystem:
         symbol: str,
         limit: int = 1000,
     ) -> CandleSeries:
-        """Fetch historical candles from exchange.
+        """Fetch historical candles from exchange with pagination.
 
         Args:
             symbol: Trading pair symbol
@@ -116,11 +116,19 @@ class TradingSystem:
         """
         logger.info(f"Fetching {limit} candles for {symbol} from {self.config.exchange}")
 
-        ohlcv_data = await self.exchange.fetch_ohlcv(
-            symbol,
-            timeframe=self.config.timeframe,
-            limit=limit,
-        )
+        # Use paginated fetch for larger datasets
+        if hasattr(self.exchange, "fetch_ohlcv_paginated"):
+            ohlcv_data = await self.exchange.fetch_ohlcv_paginated(
+                symbol,
+                timeframe=self.config.timeframe,
+                limit=limit,
+            )
+        else:
+            ohlcv_data = await self.exchange.fetch_ohlcv(
+                symbol,
+                timeframe=self.config.timeframe,
+                limit=limit,
+            )
 
         if not ohlcv_data:
             raise ValueError(f"No data returned for {symbol}")

@@ -263,7 +263,16 @@ class KuCoinAdapter:
     async def fetch_ohlcv(
         self, symbol: str, timeframe: str = "1m", limit: int = 100
     ) -> Optional[list[dict]]:
-        """Fetch OHLCV candles via REST API."""
+        """Fetch OHLCV candles via REST API.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTCUSDT')
+            timeframe: Candle timeframe ('1m', '5m', '15m', '1h', '4h', '1d')
+            limit: Number of candles to fetch (max 2000)
+
+        Returns:
+            List of candle data or None
+        """
         try:
             normalized = self._normalize_symbol(symbol)
             # KuCoin uses 1min, 5min, 15min, etc. (not 1m, 5m)
@@ -279,3 +288,144 @@ class KuCoinAdapter:
         except Exception as e:
             logger.error(f"Failed to fetch KuCoin OHLCV: {e}")
         return None
+
+    async def fetch_ohlcv_paginated(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 2000,
+    ) -> list[dict]:
+        """Fetch OHLCV candles using startAt for older historical data.
+
+        Args:
+            symbol: Trading pair symbol
+            timeframe: Candle timeframe
+            limit: Number of candles to fetch (max 2000 per request)
+
+        Returns:
+            List of all fetched candles sorted oldest-first
+        """
+        try:
+            normalized = self._normalize_symbol(symbol)
+            kucoin_timeframe = timeframe.replace("m", "min")
+
+            # Use startAt to get older data (Unix timestamp in seconds)
+            # Default to ~30 days back for 1m candles
+            import time
+
+            timeframe_seconds = {
+                "1min": 60,
+                "5min": 300,
+                "15min": 900,
+                "1hour": 3600,
+                "4hour": 14400,
+                "1day": 86400,
+            }
+            tf_seconds = timeframe_seconds.get(kucoin_timeframe, 60)
+            back_seconds = tf_seconds * (limit + 500)
+            start_at = int(time.time()) - back_seconds
+
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.config.rest_url}/api/v1/market/candles?symbol={normalized}&type={kucoin_timeframe}&limit={limit}&startAt={start_at}"
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                    if data.get("code") != "200000":
+                        logger.warning(f"KuCoin pagination error: {data.get('msg')}")
+                        return []
+
+                    candles = data["data"]
+                    if not candles:
+                        return []
+
+                    # Sort oldest-first (timestamps are newest-first by default)
+                    candles.sort(key=lambda x: int(x[0]))
+
+                    logger.info(f"Fetched {len(candles)} candles from {normalized}")
+
+                    return candles
+
+        except Exception as e:
+            logger.error(f"KuCoin pagination error: {e}")
+            return []
+
+    async def fetch_historical_by_period(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        days: int = 30,
+        candles_per_day: int = 1440,  # 1440 minutes in a day
+    ) -> list[dict]:
+        """Fetch historical candles for a specific period.
+
+        Makes multiple requests to cover the requested number of days.
+
+        Args:
+            symbol: Trading pair symbol
+            timeframe: Candle timeframe
+            days: Number of days of historical data to fetch
+            candles_per_day: Number of candles per day for the timeframe
+
+        Returns:
+            List of all fetched candles sorted oldest-first
+        """
+        import time
+
+        normalized = self._normalize_symbol(symbol)
+        kucoin_timeframe = timeframe.replace("m", "min")
+
+        # Calculate timestamps for each day going backwards
+        timeframe_seconds = {
+            "1min": 60,
+            "5min": 300,
+            "15min": 900,
+            "1hour": 3600,
+            "4hour": 14400,
+            "1day": 86400,
+        }
+        tf_seconds = timeframe_seconds.get(kucoin_timeframe, 60)
+        days_in_chunk = min(days, 30)  # Request in chunks of ~30 days to stay within limits
+
+        all_candles = []
+        now = int(time.time())
+
+        for chunk_start in range(days, 0, -days_in_chunk):
+            chunk_end = chunk_start
+            chunk_start_ts = now - (chunk_start * 86400)
+            chunk_end_ts = now - (chunk_end * 86400) + 86400
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f"{self.config.rest_url}/api/v1/market/candles?symbol={normalized}&type={kucoin_timeframe}&limit=2000&startAt={chunk_start_ts}"
+                    async with session.get(url) as resp:
+                        data = await resp.json()
+                        if data.get("code") != "200000":
+                            logger.warning(f"KuCoin chunk error: {data.get('msg')}")
+                            continue
+
+                        candles = data.get("data", [])
+                        if candles:
+                            # Filter to only include candles within our date range
+                            for candle in candles:
+                                ts = int(candle[0])
+                                if chunk_start_ts <= ts <= chunk_end_ts:
+                                    all_candles.append(candle)
+
+            except Exception as e:
+                logger.error(f"KuCoin chunk error: {e}")
+                continue
+
+            # Rate limiting
+            await asyncio.sleep(0.1)
+
+        # Sort oldest-first and deduplicate
+        all_candles.sort(key=lambda x: int(x[0]))
+        seen = set()
+        result = []
+        for candle in all_candles:
+            ts = int(candle[0])
+            if ts not in seen:
+                seen.add(ts)
+                result.append(candle)
+
+        logger.info(f"Fetched {len(result)} candles for {symbol} over {days} days")
+        return result

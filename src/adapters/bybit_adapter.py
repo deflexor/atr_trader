@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Dict, Optional, Callable, Any
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiohttp
 import websockets
@@ -201,7 +201,7 @@ class BybitAdapter:
                 async with session.get(url) as resp:
                     data = await resp.json()
                     if data.get("retCode") == 0:
-                        return data["data"]["list"][0] if data["data"]["list"] else None
+                        return data["result"]["list"][0] if data["result"]["list"] else None
         except Exception as e:
             logger.error(f"Failed to fetch Bybit ticker: {e}")
         return None
@@ -217,10 +217,140 @@ class BybitAdapter:
                 async with session.get(url) as resp:
                     data = await resp.json()
                     if data.get("retCode") == 0:
-                        return data["data"]["list"]
+                        return data["result"]["list"]
         except Exception as e:
             logger.error(f"Failed to fetch Bybit OHLCV: {e}")
         return None
+
+    async def fetch_ohlcv_paginated(
+        self,
+        symbol: str,
+        timeframe: str = "1",
+        limit: int = 1000,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> list[dict]:
+        """Fetch OHLCV candles with pagination for historical data.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTCUSDT')
+            timeframe: Candle timeframe (1, 5, 15, 30, 60, 240, 1000, 2000)
+            limit: Number of candles per request (max 1000)
+            start_time: Start timestamp in milliseconds (optional) - stop pagination at this point
+            end_time: End timestamp in milliseconds (optional)
+
+        Returns:
+            List of all fetched candles sorted oldest-first
+        """
+        all_candles = []
+        current_end = end_time
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                page_count = 0
+                max_pages = 200  # Safety limit - increased for longer periods
+
+                while page_count < max_pages:
+                    page_count += 1
+                    params = {
+                        "category": "spot",
+                        "symbol": self._normalize_symbol(symbol),
+                        "interval": timeframe,
+                        "limit": min(limit, 1000),
+                    }
+
+                    if current_end:
+                        params["end"] = current_end
+
+                    url = f"{self.config.rest_url}/v5/market/kline"
+                    async with session.get(url, params=params) as resp:
+                        data = await resp.json()
+                        if data.get("retCode") != 0:
+                            logger.warning(f"Bybit pagination error: {data.get('retMsg')}")
+                            break
+
+                        candles = data["result"]["list"]
+                        if not candles:
+                            break
+
+                        all_candles.extend(candles)
+
+                        # Set end to oldest timestamp - 1ms to get previous batch
+                        oldest_ts = int(candles[-1][0])
+                        current_end = oldest_ts - 1
+
+                        # Small delay to avoid rate limits
+                        await asyncio.sleep(0.1)
+
+                        # If we got fewer than limit, we're at the end
+                        if len(candles) < 1000:
+                            break
+
+                        # Stop if we've reached the start_time limit
+                        if start_time and oldest_ts <= start_time:
+                            logger.info(f"Reached start_time limit, stopping pagination")
+                            break
+
+                # Sort oldest-first and deduplicate
+                all_candles.sort(key=lambda x: int(x[0]))
+                seen = set()
+                result = []
+                for candle in all_candles:
+                    ts = int(candle[0])
+                    if ts not in seen:
+                        seen.add(ts)
+                        result.append(candle)
+                all_candles = result
+
+                logger.info(f"Bybit fetched {len(all_candles)} candles for {symbol}")
+
+        except Exception as e:
+            logger.error(f"Bybit pagination error: {e}")
+
+        return all_candles
+
+    async def fetch_historical_by_period(
+        self,
+        symbol: str,
+        timeframe: str = "1",
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> list[dict]:
+        """Fetch historical candles for a specific date range.
+
+        Args:
+            symbol: Trading pair symbol
+            timeframe: Candle timeframe
+            start_date: Start datetime (defaults to ~60 days ago)
+            end_date: End datetime (defaults to now)
+
+        Returns:
+            List of all fetched candles sorted oldest-first
+        """
+        import time
+
+        end_time = int((end_date or datetime.now()).timestamp() * 1000)
+        start_time = int((start_date or datetime.now() - timedelta(days=60)).timestamp() * 1000)
+
+        # Map timeframe string to Bybit interval
+        interval_map = {
+            "1m": "1",
+            "5m": "5",
+            "15m": "15",
+            "30m": "30",
+            "1h": "60",
+            "4h": "240",
+            "1d": "D",
+            "1w": "W",
+        }
+        interval = interval_map.get(timeframe, timeframe)
+
+        return await self.fetch_ohlcv_paginated(
+            symbol=symbol,
+            timeframe=interval,
+            start_time=start_time,
+            end_time=end_time,
+        )
 
     async def fetch_orderbook(self, symbol: str, limit: int = 50) -> Optional[dict]:
         """Fetch order book via REST API."""
@@ -231,7 +361,7 @@ class BybitAdapter:
                 async with session.get(url) as resp:
                     data = await resp.json()
                     if data.get("retCode") == 0:
-                        return data["data"]
+                        return data["result"]
         except Exception as e:
             logger.error(f"Failed to fetch Bybit orderbook: {e}")
         return None

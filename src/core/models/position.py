@@ -30,6 +30,12 @@ class Position:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
 
+    # Trailing stop state
+    highest_price: float = 0.0  # Track highest price since entry (for longs)
+    lowest_price: float = float("inf")  # Track lowest price since entry (for shorts)
+    trailing_stop: Optional[float] = None  # Active trailing stop level
+    trailing_activated: bool = False  # Whether trailing stop is active
+
     @property
     def cost_basis(self) -> float:
         """Calculate total cost basis for all entries."""
@@ -74,9 +80,64 @@ class Position:
         self.updated_at = datetime.utcnow()
 
     def update_price(self, price: float) -> None:
-        """Update current market price and recalculate PnL."""
+        """Update current market price and track extremes for trailing stops."""
         self.current_price = price
+        if self.side == "long":
+            if price > self.highest_price:
+                self.highest_price = price
+        else:
+            if price < self.lowest_price:
+                self.lowest_price = price
         self.updated_at = datetime.utcnow()
+
+    def update_trailing_stop(
+        self,
+        activation_atr: float,
+        distance_atr: float,
+        atr_value: float,
+    ) -> None:
+        """Update trailing stop based on price movement and ATR.
+
+        Activation: price must have moved activation_atr * ATR in our favor.
+        Distance: trail at distance_atr * ATR behind the extreme.
+        """
+        if atr_value <= 0:
+            return
+
+        activation_threshold = activation_atr * atr_value
+        trail_distance = distance_atr * atr_value
+
+        if self.side == "long":
+            # Activate when price moved enough above entry
+            if not self.trailing_activated:
+                if self.highest_price - self.avg_entry_price >= activation_threshold:
+                    self.trailing_activated = True
+
+            if self.trailing_activated:
+                new_trail = self.highest_price - trail_distance
+                # Only move trailing stop UP, never down
+                if self.trailing_stop is None or new_trail > self.trailing_stop:
+                    self.trailing_stop = new_trail
+        else:
+            # Short: activate when price dropped enough below entry
+            if not self.trailing_activated:
+                if self.avg_entry_price - self.lowest_price >= activation_threshold:
+                    self.trailing_activated = True
+
+            if self.trailing_activated:
+                new_trail = self.lowest_price + trail_distance
+                # Only move trailing stop DOWN, never up
+                if self.trailing_stop is None or new_trail < self.trailing_stop:
+                    self.trailing_stop = new_trail
+
+    def is_trailing_triggered(self) -> bool:
+        """Check if trailing stop is triggered."""
+        if not self.trailing_activated or self.trailing_stop is None:
+            return False
+        if self.side == "long":
+            return self.current_price <= self.trailing_stop
+        else:
+            return self.current_price >= self.trailing_stop
 
     def is_stop_triggered(self) -> bool:
         """Check if stop loss is triggered."""

@@ -37,6 +37,9 @@ class BacktestConfig:
     atr_sl_multiplier: float = 3.0  # SL = 3x ATR (wide to avoid noise)
     atr_tp_multiplier: float = 6.0  # TP = 6x ATR (2:1 R:R, let winners run)
     cooldown_candles: int = 12  # Wait 12 candles (1hr on 5m) between trades
+    use_trailing_stop: bool = True  # Enable trailing stops after activation
+    trailing_activation_atr: float = 0.5  # Activate after 0.5x ATR profit
+    trailing_distance_atr: float = 0.75  # Trail at 0.75x ATR behind extreme
 
 
 @dataclass
@@ -159,7 +162,7 @@ class BacktestEngine:
             )
 
             # Update positions with candle high/low for realistic SL/TP
-            self._update_positions_with_candle(candle)
+            self._update_positions_with_candle(candle, visible_candles, i)
 
             # Generate signal using only visible data
             signal = await signal_generator(candles.symbol, visible_candles)
@@ -222,7 +225,12 @@ class BacktestEngine:
             if position.is_stop_triggered() or position.is_tp_triggered():
                 self._close_position(position, current_price, 0, "stop_or_tp")
 
-    def _update_positions_with_candle(self, candle: Candle) -> None:
+    def _update_positions_with_candle(
+        self,
+        candle: Candle,
+        visible_candles: CandleSeries,
+        candle_idx: int,
+    ) -> None:
         """Update positions using candle H/L for realistic SL/TP fills.
 
         Checks if the candle's high or low would trigger stops before
@@ -259,6 +267,21 @@ class BacktestEngine:
 
             # No trigger — update to close price
             position.update_price(candle.close)
+
+            # Update trailing stop after price update
+            if self.config.use_trailing_stop:
+                atr = self._calculate_atr(visible_candles, self.config.atr_period)
+                if atr and atr > 0:
+                    position.update_trailing_stop(
+                        self.config.trailing_activation_atr,
+                        self.config.trailing_distance_atr,
+                        atr,
+                    )
+                    # Check if trailing stop is now triggered
+                    if position.is_trailing_triggered():
+                        self._close_position(
+                            position, position.trailing_stop, candle.volume, "trailing_stop"
+                        )
 
     def _process_signal(
         self,

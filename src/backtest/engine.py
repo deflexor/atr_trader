@@ -25,10 +25,18 @@ class BacktestConfig:
     """Configuration for backtesting."""
 
     initial_capital: float = 10000.0
-    commission: float = 0.001  # 0.1% per trade
+    commission: float = 0.0006  # 0.06% per trade (maker+taker avg)
     slippage_type: str = "volume"  # volume or orderbook
-    slippage_factor: float = 0.0005
-    max_positions: int = 10
+    slippage_factor: float = 0.0003  # 0.03% slippage
+    max_positions: int = 3
+    risk_per_trade: float = 0.02  # 2% of capital per trade
+    stop_loss_pct: float = 0.02  # 2% stop loss (fallback)
+    take_profit_pct: float = 0.04  # 4% take profit (fallback, 2:1 R:R)
+    use_atr_stops: bool = True  # Use ATR-based dynamic stops
+    atr_period: int = 14
+    atr_sl_multiplier: float = 3.0  # SL = 3x ATR (wide to avoid noise)
+    atr_tp_multiplier: float = 6.0  # TP = 6x ATR (2:1 R:R, let winners run)
+    cooldown_candles: int = 12  # Wait 12 candles (1hr on 5m) between trades
 
 
 @dataclass
@@ -79,6 +87,7 @@ class BacktestEngine:
         self.equity_curve: list[dict] = []
         self.start_time: Optional[datetime] = None
         self.end_time: Optional[datetime] = None
+        self._last_trade_candle: int = -999  # Cooldown tracking
 
     def reset(self) -> None:
         """Reset backtest state for new run."""
@@ -88,7 +97,26 @@ class BacktestEngine:
         self.equity_curve = []
         self.start_time = None
         self.end_time = None
+        self._last_trade_candle = -999
         self.metrics.reset()
+
+    def _calculate_atr(self, candles: CandleSeries, period: int = 14) -> Optional[float]:
+        """Calculate Average True Range for dynamic stop sizing."""
+        if len(candles.candles) < period + 1:
+            return None
+
+        true_ranges = []
+        for i in range(-period, 0):
+            c = candles.candles[i]
+            prev_c = candles.candles[i - 1]
+            tr = max(
+                c.high - c.low,
+                abs(c.high - prev_c.close),
+                abs(c.low - prev_c.close),
+            )
+            true_ranges.append(tr)
+
+        return sum(true_ranges) / len(true_ranges) if true_ranges else None
 
     async def run(
         self,
@@ -122,15 +150,27 @@ class BacktestEngine:
         for i, candle in enumerate(candles.candles):
             timestamp = candle.timestamp
 
-            # Update positions with current price
-            self._update_positions(candle.close)
+            # Build a view of candles up to current point (strategy sees only past)
+            visible_candles = CandleSeries(
+                candles=candles.candles[: i + 1],
+                symbol=candles.symbol,
+                exchange=candles.exchange,
+                timeframe=candles.timeframe,
+            )
 
-            # Generate signal
-            signal = await signal_generator(candles.symbol, candles)
+            # Update positions with candle high/low for realistic SL/TP
+            self._update_positions_with_candle(candle)
 
-            # Process signal
+            # Generate signal using only visible data
+            signal = await signal_generator(candles.symbol, visible_candles)
+
+            # Process signal: open new position if cooldown passed
             if signal.is_actionable and signal.direction != SignalDirection.NEUTRAL:
-                self._process_signal(signal, candle)
+                in_cooldown = (i - self._last_trade_candle) < self.config.cooldown_candles
+                if not in_cooldown:
+                    self._process_signal(signal, candle, visible_candles)
+                    if self.positions and self.positions[-1].strategy_id:
+                        self._last_trade_candle = i
 
             # Record equity
             equity = self._calculate_equity(candle.close)
@@ -180,26 +220,82 @@ class BacktestEngine:
 
             # Check stop loss / take profit
             if position.is_stop_triggered() or position.is_tp_triggered():
-                self._close_position(position, current_price, "exit")
+                self._close_position(position, current_price, 0, "stop_or_tp")
 
-    def _process_signal(self, signal: Signal, candle: Candle) -> None:
+    def _update_positions_with_candle(self, candle: Candle) -> None:
+        """Update positions using candle H/L for realistic SL/TP fills.
+
+        Checks if the candle's high or low would trigger stops before
+        processing the close price.
+        """
+        for position in self.positions[:]:
+            # Check stop loss using worst-case price within candle
+            if position.side == "long":
+                # For longs, check if low hits stop loss
+                if position.stop_loss and candle.low <= position.stop_loss:
+                    position.update_price(position.stop_loss)
+                    self._close_position(position, position.stop_loss, candle.volume, "stop_loss")
+                    continue
+                # Check if high hits take profit
+                if position.take_profit and candle.high >= position.take_profit:
+                    position.update_price(position.take_profit)
+                    self._close_position(
+                        position, position.take_profit, candle.volume, "take_profit"
+                    )
+                    continue
+            else:
+                # For shorts, check if high hits stop loss
+                if position.stop_loss and candle.high >= position.stop_loss:
+                    position.update_price(position.stop_loss)
+                    self._close_position(position, position.stop_loss, candle.volume, "stop_loss")
+                    continue
+                # Check if low hits take profit
+                if position.take_profit and candle.low <= position.take_profit:
+                    position.update_price(position.take_profit)
+                    self._close_position(
+                        position, position.take_profit, candle.volume, "take_profit"
+                    )
+                    continue
+
+            # No trigger — update to close price
+            position.update_price(candle.close)
+
+    def _process_signal(
+        self,
+        signal: Signal,
+        candle: Candle,
+        visible_candles: Optional[CandleSeries] = None,
+    ) -> None:
         """Process trading signal and execute orders."""
+        # Don't open if we already have a position in this direction
+        same_direction = any(
+            (p.side == "long" and signal.direction == SignalDirection.LONG)
+            or (p.side == "short" and signal.direction == SignalDirection.SHORT)
+            for p in self.positions
+        )
+        if same_direction:
+            return
+
         # Check if we can open new position
         if len(self.positions) >= self.config.max_positions:
             return
 
-        # Calculate quantity if not set
+        # Position sizing: risk a percentage of capital per trade
         quantity = signal.quantity
-        if quantity <= 0:
-            # Use simple position sizing: risk 1% of capital per trade
-            quantity = (self.capital * 0.01) / signal.price if signal.price > 0 else 0
+        if quantity <= 0 and signal.price > 0:
+            position_value = self.capital * self.config.risk_per_trade
+            quantity = position_value / signal.price
 
         if quantity <= 0:
             return
 
-        # Check if we have enough capital
-        if self.capital < signal.price * quantity:
-            return
+        # Check if we have enough capital for the position
+        required_capital = signal.price * quantity
+        if self.capital < required_capital:
+            # Scale down to what we can afford
+            quantity = self.capital * 0.95 / signal.price  # Leave 5% buffer
+            if quantity <= 0:
+                return
 
         # Calculate fill price with slippage
         fill_price = self.fill_simulator.calculate_fill_price(
@@ -208,25 +304,41 @@ class BacktestEngine:
             candle.volume,
         )
 
+        # Calculate stop loss and take profit
+        if self.config.use_atr_stops and visible_candles:
+            atr = self._calculate_atr(visible_candles, self.config.atr_period)
+        else:
+            atr = None
+
+        is_long = signal.direction == SignalDirection.LONG
+
+        if atr and atr > 0:
+            sl_distance = atr * self.config.atr_sl_multiplier
+            tp_distance = atr * self.config.atr_tp_multiplier
+        else:
+            sl_distance = fill_price * self.config.stop_loss_pct
+            tp_distance = fill_price * self.config.take_profit_pct
+
+        if is_long:
+            stop_loss = fill_price - sl_distance
+            take_profit = fill_price + tp_distance
+        else:
+            stop_loss = fill_price + sl_distance
+            take_profit = fill_price - tp_distance
+
         # Create position
         position = Position(
             symbol=signal.symbol,
             exchange=signal.exchange,
-            side="long" if signal.direction == SignalDirection.LONG else "short",
+            side="long" if is_long else "short",
             quantity=quantity,
             entry_price=fill_price,
             current_price=fill_price,
             strategy_id=signal.strategy_id,
             entries=[{"price": fill_price, "quantity": quantity, "timestamp": candle.timestamp}],
+            stop_loss=stop_loss,
+            take_profit=take_profit,
         )
-
-        # Calculate stop loss and take profit
-        if signal.direction == SignalDirection.LONG:
-            position.stop_loss = fill_price * (1 - 0.01)  # 1% stop
-            position.take_profit = fill_price * (1 + 0.02)  # 2% take profit
-        else:
-            position.stop_loss = fill_price * (1 + 0.01)
-            position.take_profit = fill_price * (1 - 0.02)
 
         self.positions.append(position)
 
@@ -244,6 +356,8 @@ class BacktestEngine:
                 "quantity": quantity,
                 "commission": commission_cost,
                 "signal_strength": signal.strength,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
             }
         )
 
@@ -251,14 +365,23 @@ class BacktestEngine:
         self,
         position: Position,
         current_price: float,
+        volume: float = 0,
         reason: str = "signal",
     ) -> None:
-        """Close a position and record PnL."""
-        # Calculate fill price with slippage
+        """Close a position and record PnL.
+
+        Args:
+            position: Position to close
+            current_price: Current market price (NOT entry price!)
+            volume: Candle volume for slippage calc
+            reason: Why the position was closed
+        """
+        # Calculate fill price with slippage based on CURRENT price
+        # For closing longs we sell (is_buy=False), for closing shorts we buy (is_buy=True)
         fill_price = self.fill_simulator.calculate_fill_price(
-            position.avg_entry_price,  # Use entry price as reference
-            position.side == "long",
-            0,  # Volume not available in position close
+            current_price,  # FIXED: was using entry_price!
+            position.side != "long",  # Closing: reverse the buy direction
+            volume,
         )
 
         # Calculate PnL
@@ -272,8 +395,9 @@ class BacktestEngine:
         commission_cost = close_value * self.config.commission
         net_pnl = pnl - commission_cost
 
-        # Update capital
-        self.capital += close_value - commission_cost
+        # Update capital: return the position's value minus commission
+        entry_value = position.avg_entry_price * position.total_quantity
+        self.capital += entry_value + net_pnl
 
         # Record trade
         self.trades.append(
@@ -281,10 +405,13 @@ class BacktestEngine:
                 "timestamp": datetime.utcnow(),
                 "symbol": position.symbol,
                 "side": "close",
+                "entry_price": position.avg_entry_price,
                 "exit_price": fill_price,
                 "quantity": position.total_quantity,
                 "pnl": net_pnl,
+                "pnl_pct": (net_pnl / entry_value * 100) if entry_value > 0 else 0,
                 "reason": reason,
+                "commission": commission_cost,
             }
         )
 

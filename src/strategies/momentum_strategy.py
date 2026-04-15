@@ -51,6 +51,10 @@ class MomentumConfig(StrategyConfig):
     mtf_ema_fast: int = 3  # Fast EMA on higher timeframe (responsive)
     mtf_ema_slow: int = 8  # Slow EMA on higher timeframe (responsive)
 
+    # Volatility filter
+    atr_filter_enabled: bool = True  # Skip entries in low-vol conditions
+    atr_filter_min: float = 125.0  # Minimum ATR (in price units) to enter
+
 
 class MomentumStrategy(BaseStrategy):
     """Trend-following momentum strategy.
@@ -247,6 +251,46 @@ class MomentumStrategy(BaseStrategy):
         prev = candles.candles[-2]
         return prev.low if is_long else prev.high
 
+    def _calculate_atr(self, candles: CandleSeries, period: int = 14) -> float:
+        """Calculate Average True Range for the candle series.
+
+        Uses the same ATR formula as the backtest engine.
+        """
+        if len(candles.candles) < period + 1:
+            return 0.0
+
+        true_ranges = []
+        for i in range(-period, 0):
+            c = candles.candles[i]
+            prev_c = candles.candles[i - 1]
+            tr = max(
+                c.high - c.low,
+                abs(c.high - prev_c.close),
+                abs(c.low - prev_c.close),
+            )
+            true_ranges.append(tr)
+
+        return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
+
+    def _check_volatility_filter(
+        self,
+        candles: CandleSeries,
+        atr_threshold: float,
+    ) -> bool:
+        """Check if market volatility is sufficient for momentum entries.
+
+        Low volatility (choppy, ranging market) causes momentum strategies to
+        generate false signals at EMA boundaries. Skips entries when ATR
+        falls below the threshold.
+
+        Returns True if volatility is sufficient (don't block entry).
+        """
+        if atr_threshold <= 0:
+            return True
+
+        atr = self._calculate_atr(candles, period=14)
+        return atr >= atr_threshold
+
     def _check_mtf_trend(
         self,
         candles: CandleSeries,
@@ -325,6 +369,18 @@ class MomentumStrategy(BaseStrategy):
                 confidence=0.0,
                 strategy_id=self.config.name,
             )
+
+        # --- Volatility filter: skip choppy markets ---
+        if self.momentum_config.atr_filter_enabled:
+            if not self._check_volatility_filter(candles, self.momentum_config.atr_filter_min):
+                return Signal(
+                    symbol=symbol,
+                    exchange=candles.exchange or "kucoin",
+                    direction=SignalDirection.NEUTRAL,
+                    strength=0.0,
+                    confidence=0.0,
+                    strategy_id=self.config.name,
+                )
 
         closes = candles.closes
         cfg = self.momentum_config

@@ -1,0 +1,34 @@
+{
+  "id": "algo-trading-bot-13",
+  "seq": "13",
+  "title": "Volatility filtering module",
+  "status": "pending",
+  "depends_on": ["12"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "53-72",
+      "reason": "Pure functions for technical indicators"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "ATR (Average True Range) calculation",
+    "Volatility regime detection (low/medium/high/extreme)",
+    "Max volatility filter (configurable threshold, e.g., 2x ATR)",
+    "Volatility breakout detection",
+    "Rolling window volatility calculation",
+    "Volatility-based signal adjustment (reduce size in high vol)"
+  ],
+  "deliverables": [
+    "src/strategies/indicators/__init__.py",
+    "src/strategies/indicators/volatility.py",
+    "src/strategies/filters/__init__.py",
+    "src/strategies/filters/volatility_filter.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "strategy-framework"
+}

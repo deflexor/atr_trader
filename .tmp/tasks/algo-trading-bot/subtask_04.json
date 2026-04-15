@@ -1,0 +1,45 @@
+{
+  "id": "algo-trading-bot-04",
+  "seq": "04",
+  "title": "KuCoin WebSocket adapter",
+  "status": "pending",
+  "depends_on": ["01"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "53-72",
+      "reason": "Pure functions and immutability for data transformation"
+    }
+  ],
+  "reference_files": [
+    ".tmp/external-context/kucoin/websocket-market-data.md"
+  ],
+  "acceptance_criteria": [
+    "Connects to KuCoin WebSocket using bullet token flow",
+    "Subscribes to ticker, trades, orderbook (L2), and candles topics",
+    "Reconnects automatically on disconnect with backoff",
+    "Token refresh before expiry (24h)",
+    "Emits typed events: TickerUpdate, TradeUpdate, OrderbookUpdate, CandleUpdate",
+    "Ping/pong handling per KuCoin protocol"
+  ],
+  "deliverables": [
+    "src/adapters/kucoin/__init__.py",
+    "src/adapters/kucoin/websocket.py",
+    "src/adapters/kucoin/token_provider.py",
+    "src/adapters/kucoin/events.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "exchange-adapters",
+  "contracts": [
+    {
+      "type": "interface",
+      "name": "MarketDataProvider",
+      "path": "src/adapters/base.py",
+      "status": "defined",
+      "description": "Abstract interface for market data providers"
+    }
+  ]
+}

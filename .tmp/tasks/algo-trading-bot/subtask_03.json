@@ -1,0 +1,38 @@
+{
+  "id": "algo-trading-bot-03",
+  "seq": "03",
+  "title": "SQLite database layer",
+  "status": "pending",
+  "depends_on": ["02"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "126-142",
+      "reason": "Dependency injection and explicit interfaces"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "Database schema created for all models (orders, positions, signals, candles, portfolio_history)",
+    "Async database operations using aiosqlite",
+    "Repository pattern for data access",
+    "Migration system for schema updates",
+    "Connection pooling"
+  ],
+  "deliverables": [
+    "src/core/db/__init__.py",
+    "src/core/db/schema.sql",
+    "src/core/db/connection.py",
+    "src/core/db/repositories/__init__.py",
+    "src/core/db/repositories/market_data_repo.py",
+    "src/core/db/repositories/order_repo.py",
+    "src/core/db/repositories/position_repo.py",
+    "src/core/db/repositories/signal_repo.py",
+    "src/core/db/migrations.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "data-persistence"
+}

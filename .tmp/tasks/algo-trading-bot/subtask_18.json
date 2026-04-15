@@ -1,0 +1,37 @@
+{
+  "id": "algo-trading-bot-18",
+  "seq": "18",
+  "title": "Performance metrics (Sharpe, drawdown, win rate)",
+  "status": "pending",
+  "depends_on": ["17"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "53-72",
+      "reason": "Statistical calculations as pure functions"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "Total return calculation (absolute and %)",
+    "Sharpe ratio (annualized, with configurable risk-free rate)",
+    "Sortino ratio (downside deviation)",
+    "Max drawdown (absolute and %) with recovery time",
+    "Win rate (% of profitable trades)",
+    "Profit factor (gross profit / gross loss)",
+    "Average trade duration",
+    "Trade-by-trade breakdown export"
+  ],
+  "deliverables": [
+    "src/backtest/metrics/__init__.py",
+    "src/backtest/metrics/returns.py",
+    "src/backtest/metrics/risk.py",
+    "src/backtest/metrics/trade_stats.py",
+    "src/backtest/metrics/equity_curve.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "backtesting"
+}

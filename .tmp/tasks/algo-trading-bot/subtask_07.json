@@ -1,0 +1,33 @@
+{
+  "id": "algo-trading-bot-07",
+  "seq": "07",
+  "title": "Bybit REST adapter",
+  "status": "pending",
+  "depends_on": ["06"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "104-125",
+      "reason": "Error handling patterns for API calls"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "Authenticated REST API calls using HMAC-SHA256 (Bybit v5 signature)",
+    "Order placement (market, limit, stop) with proper encoding",
+    "Order cancellation and modification",
+    "Account balance retrieval (spot and linear)",
+    "Position query for linear contracts",
+    "Rate limit handling with retry backoff"
+  ],
+  "deliverables": [
+    "src/adapters/bybit/rest.py",
+    "src/adapters/bybit/auth.py",
+    "src/adapters/bybit/rate_limiter.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "exchange-adapters"
+}

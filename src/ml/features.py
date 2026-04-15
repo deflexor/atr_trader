@@ -6,7 +6,7 @@ Creates features from market data for ML model training.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, list
+from typing import Optional
 from datetime import datetime
 
 import numpy as np
@@ -40,6 +40,20 @@ class FeatureEngine:
     def __init__(self, config: Optional[FeatureConfig] = None):
         self.config = config or FeatureConfig()
         self.feature_names: list[str] = []
+
+    @property
+    def num_features(self) -> int:
+        """Calculate total number of features based on default config (without market_data).
+
+        This is used for model configuration when market_data is not provided.
+        """
+        num = 3  # Returns, normalized price, HL range
+        if self.config.include_technical:
+            num += 4  # RSI, MACD, BB, MA diff
+        if self.config.include_volume:
+            num += 3  # Volume norm, momentum, VWAP
+        # Market depth features only when market_data is provided
+        return num
 
     def create_features(
         self,
@@ -192,6 +206,7 @@ class FeatureEngine:
         # VWAP deviation
         vwap = self._calculate_vwap(candles)
         if vwap is not None:
+            closes = np.array(candles.closes)
             vwap_dev = (closes - vwap) / vwap
             features.append(vwap_dev[-self.config.window_size :].tolist())
         else:
@@ -308,10 +323,12 @@ class FeatureEngine:
         ma_fast = np.convolve(prices, np.ones(fast) / fast, mode="valid")
         ma_slow = np.convolve(prices, np.ones(slow) / slow, mode="valid")
 
-        diff = ma_fast - ma_slow[-len(ma_fast) :]
+        # Align arrays by using the shorter length (they overlap only in the valid region)
+        min_len = min(len(ma_fast), len(ma_slow))
+        diff = ma_fast[-min_len:] - ma_slow[-min_len:]
 
         # Normalize by slow MA
-        diff = diff / ma_slow[-len(ma_fast) :]
+        diff = diff / ma_slow[-min_len:]
 
         # Pad to original length
         return np.concatenate([np.zeros(slow - 1), diff])

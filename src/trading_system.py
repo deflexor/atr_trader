@@ -128,11 +128,12 @@ class TradingSystem:
         candles = []
         for item in ohlcv_data:
             # KuCoin format: [timestamp, open, close, high, low, volume]
+            # Timestamps are returned as strings
             candle = Candle(
                 symbol=symbol,
                 exchange=self.config.exchange,
                 timeframe=self.config.timeframe,
-                timestamp=datetime.fromtimestamp(item[0] / 1000),
+                timestamp=datetime.fromtimestamp(int(item[0]) / 1000),
                 open=float(item[1]),
                 close=float(item[2]),
                 high=float(item[3]),
@@ -166,6 +167,8 @@ class TradingSystem:
         train_features, train_labels = self._prepare_training_data(candles)
 
         # Initialize training pipeline
+        # Get actual number of features from feature engine
+        actual_num_features = self.feature_engine.num_features
         self.training_pipeline = TrainingPipeline(
             TrainingConfig(
                 feature_config=FeatureConfig(
@@ -173,7 +176,7 @@ class TradingSystem:
                     horizon=self.config.prediction_horizon,
                 ),
                 model_config=ModelConfig(
-                    input_size=self.config.feature_window,
+                    num_features=actual_num_features,
                     hidden_dims=[128, 64, 32],
                     output_size=1,
                     learning_rate=0.001,

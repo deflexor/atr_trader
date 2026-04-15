@@ -1,0 +1,36 @@
+{
+  "id": "algo-trading-bot-09",
+  "seq": "09",
+  "title": "Order execution with slippage modeling",
+  "status": "pending",
+  "depends_on": ["03", "07"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "53-72",
+      "reason": "Pure functions for slippage calculation"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "OrderRouter that routes orders to appropriate exchange adapter",
+    "Slippage model based on order book depth and order size",
+    "Market impact estimation (volume-based)",
+    "Fill probability calculation based on order book state",
+    "Fee calculation (maker/taker) per exchange",
+    "Order lifecycle management (pending, filled, partially_filled, cancelled)"
+  ],
+  "deliverables": [
+    "src/core/execution/__init__.py",
+    "src/core/execution/order_router.py",
+    "src/core/execution/slippage_model.py",
+    "src/core/execution/fill_simulator.py",
+    "src/core/execution/fee_calculator.py",
+    "src/core/execution/order_lifecycle.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "order-execution"
+}

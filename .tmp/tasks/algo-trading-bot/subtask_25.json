@@ -1,0 +1,36 @@
+{
+  "id": "algo-trading-bot-25",
+  "seq": "25",
+  "title": "Example strategy (Carver/Chan inspired)",
+  "status": "pending",
+  "depends_on": ["15"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "126-142",
+      "reason": "Strategy implementation example"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "Mean reversion strategy inspired by Ernest Chan",
+    "Trend following strategy inspired by Robert Carver",
+    "Both strategies use 2 parallel instances with different volatility settings",
+    "Both strategies support pyramid entries (max 2 per position)",
+    "Both strategies respect max volatility filter",
+    "Both strategies use dynamic position sizing",
+    "Backtest results demonstrate strategy differences"
+  ],
+  "deliverables": [
+    "src/strategies/examples/__init__.py",
+    "src/strategies/examples/mean_reversion.py",
+    "src/strategies/examples/trend_following.py",
+    "config/strategies/mean_reversion.yaml",
+    "config/strategies/trend_following.yaml"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "example-strategies"
+}

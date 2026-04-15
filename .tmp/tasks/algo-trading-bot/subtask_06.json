@@ -1,0 +1,43 @@
+{
+  "id": "algo-trading-bot-06",
+  "seq": "06",
+  "title": "Bybit WebSocket adapter",
+  "status": "pending",
+  "depends_on": ["01"],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "53-72",
+      "reason": "Pure functions and immutability for data transformation"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "Connects to Bybit WebSocket (Spot and Linear)",
+    "Subscribes to ticker, trades, orderbook, and kline topics",
+    "Handles authentication for private topics",
+    "Reconnects automatically with exponential backoff",
+    "Emits typed events matching KuCoin interface (for adapter interchangeability)",
+    "Ping/pong handling per Bybit protocol"
+  ],
+  "deliverables": [
+    "src/adapters/bybit/__init__.py",
+    "src/adapters/bybit/websocket.py",
+    "src/adapters/bybit/auth.py",
+    "src/adapters/bybit/events.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "exchange-adapters",
+  "contracts": [
+    {
+      "type": "interface",
+      "name": "MarketDataProvider",
+      "path": "src/adapters/base.py",
+      "status": "defined",
+      "description": "Abstract interface for market data providers"
+    }
+  ]
+}

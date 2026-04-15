@@ -1,0 +1,34 @@
+{
+  "id": "algo-trading-bot-17",
+  "seq": "17",
+  "title": "Realistic fill simulation",
+  "status": "pending",
+  "depends_on": ["16"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "53-72",
+      "reason": "Stochastic modeling with pure functions"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "FillSimulator that determines if order would fill at given price",
+    "Order book depth modeling (Level 2 data snapshot)",
+    "Volume-based fill probability (large orders less likely to fill at once)",
+    "Market impact modeling (large orders move price against)",
+    "Slippage calculation based on order size vs book depth",
+    "Latency simulation for realistic execution delay"
+  ],
+  "deliverables": [
+    "src/backtest/fills/__init__.py",
+    "src/backtest/fills/simulator.py",
+    "src/backtest/fills/orderbook_model.py",
+    "src/backtest/fills/market_impact.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "backtesting"
+}

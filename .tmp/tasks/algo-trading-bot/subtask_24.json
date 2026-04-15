@@ -1,0 +1,36 @@
+{
+  "id": "algo-trading-bot-24",
+  "seq": "24",
+  "title": "Integration tests",
+  "status": "pending",
+  "depends_on": ["11", "15", "18", "23"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "1-50",
+      "reason": "Testing patterns"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "End-to-end test with mock exchange adapter",
+    "Backtest with real historical data produces valid results",
+    "Strategy runner correctly manages multiple strategies",
+    "Pyramid entries execute correctly",
+    "Neural net inference produces valid signal strength",
+    "Position sizing respects risk limits",
+    "All components log correctly"
+  ],
+  "deliverables": [
+    "tests/__init__.py",
+    "tests/integration/__init__.py",
+    "tests/integration/test_full_pipeline.py",
+    "tests/integration/test_backtest.py",
+    "tests/integration/test_strategy_runner.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "integration-testing"
+}

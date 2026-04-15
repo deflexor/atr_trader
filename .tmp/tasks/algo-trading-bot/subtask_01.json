@@ -1,0 +1,44 @@
+{
+  "id": "algo-trading-bot-01",
+  "seq": "01",
+  "title": "Project scaffold & configuration",
+  "status": "pending",
+  "depends_on": [],
+  "parallel": true,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "1-50",
+      "reason": "Project structure and modular patterns"
+    },
+    {
+      "path": ".opencode/context/development/principles/clean-code.md",
+      "lines": "155-161",
+      "reason": "Python-specific clean code guidelines (PEP 8, type hints)"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "uv virtual environment configured with pyproject.toml",
+    "Project directory structure matches architecture plan",
+    "pyproject.toml has dependencies: websockets, aiohttp, sqlite-utils, numpy, pandas, pytorch, ta-lib",
+    "Config module loads from YAML files",
+    "Logging configured with structured output"
+  ],
+  "deliverables": [
+    "pyproject.toml",
+    "src/__init__.py",
+    "src/adapters/__init__.py",
+    "src/core/__init__.py",
+    "src/strategies/__init__.py",
+    "src/backtest/__init__.py",
+    "src/ml/__init__.py",
+    "src/utils/__init__.py",
+    "config/base.yaml",
+    "src/utils/config.py",
+    "src/utils/logging.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot"
+}

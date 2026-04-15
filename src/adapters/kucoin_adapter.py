@@ -266,12 +266,16 @@ class KuCoinAdapter:
         """Fetch OHLCV candles via REST API."""
         try:
             normalized = self._normalize_symbol(symbol)
+            # KuCoin uses 1min, 5min, 15min, etc. (not 1m, 5m)
+            kucoin_timeframe = timeframe.replace("m", "min")
             async with aiohttp.ClientSession() as session:
-                url = f"{self.config.rest_url}/api/v1/market/candles?symbol={normalized}&type={timeframe}&limit={limit}"
+                url = f"{self.config.rest_url}/api/v1/market/candles?symbol={normalized}&type={kucoin_timeframe}&limit={limit}"
                 async with session.get(url) as resp:
                     data = await resp.json()
                     if data.get("code") == "200000":
                         return data["data"]
+                    else:
+                        logger.warning(f"KuCoin OHLCV error: {data.get('msg')}")
         except Exception as e:
             logger.error(f"Failed to fetch KuCoin OHLCV: {e}")
         return None

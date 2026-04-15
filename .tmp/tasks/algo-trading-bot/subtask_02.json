@@ -1,0 +1,38 @@
+{
+  "id": "algo-trading-bot-02",
+  "seq": "02",
+  "title": "Data models & schema design",
+  "status": "pending",
+  "depends_on": ["01"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "50-72",
+      "reason": "Immutable data structures and composition patterns"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "MarketData model with symbol, price, volume, timestamp, bid/ask",
+    "Order model with type, side, quantity, price, status, fills",
+    "Position model with symbol, quantity, entry_price, current_price, pnl",
+    "Signal model with strategy_id, symbol, direction, strength, timestamp",
+    "Candle/OHLCV model for historical data",
+    "Portfolio state model",
+    "All models use dataclasses with type hints"
+  ],
+  "deliverables": [
+    "src/core/models/__init__.py",
+    "src/core/models/market_data.py",
+    "src/core/models/order.py",
+    "src/core/models/position.py",
+    "src/core/models/signal.py",
+    "src/core/models/candle.py",
+    "src/core/models/portfolio.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "data-models"
+}

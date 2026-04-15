@@ -1,0 +1,37 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-04-14T00:00:00Z",
+  "library": "kucoin",
+  "files": [
+    {
+      "filename": "market-data-rest-api.md",
+      "topic": "Market data REST API",
+      "fetched": "2026-04-14T00:00:00Z",
+      "source": "Context7 API"
+    },
+    {
+      "filename": "account-orders-rest-api.md",
+      "topic": "Account and orders REST API",
+      "fetched": "2026-04-14T00:00:00Z",
+      "source": "Context7 API"
+    },
+    {
+      "filename": "websocket-market-data.md",
+      "topic": "WebSocket market data",
+      "fetched": "2026-04-14T00:00:00Z",
+      "source": "Context7 API"
+    },
+    {
+      "filename": "authentication.md",
+      "topic": "Authentication and signing",
+      "fetched": "2026-04-14T00:00:00Z",
+      "source": "Context7 API"
+    },
+    {
+      "filename": "rate-limits.md",
+      "topic": "Rate limits",
+      "fetched": "2026-04-14T00:00:00Z",
+      "source": "Context7 API"
+    }
+  ]
+}

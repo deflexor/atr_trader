@@ -1,0 +1,35 @@
+{
+  "id": "algo-trading-bot-11",
+  "seq": "11",
+  "title": "Dynamic position sizing",
+  "status": "pending",
+  "depends_on": ["10"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "53-72",
+      "reason": "Pure functions for risk calculation"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "Kelly criterion-based sizing calculation",
+    "Volatility-adjusted position sizing (ATR-based)",
+    "Risk parity sizing across multiple positions",
+    "Max drawdown-based position reduction",
+    "Correlation-aware portfolio sizing",
+    "Configurable risk parameters (max risk per trade, max portfolio risk)"
+  ],
+  "deliverables": [
+    "src/core/portfolio/sizing/__init__.py",
+    "src/core/portfolio/sizing/kelly_sizer.py",
+    "src/core/portfolio/sizing/volatility_sizer.py",
+    "src/core/portfolio/sizing/risk_parity_sizer.py",
+    "src/core/portfolio/sizing/drawdown_sizer.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "portfolio-management"
+}

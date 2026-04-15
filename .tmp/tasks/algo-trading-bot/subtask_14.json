@@ -1,0 +1,34 @@
+{
+  "id": "algo-trading-bot-14",
+  "seq": "14",
+  "title": "Pyramid entry support",
+  "status": "pending",
+  "depends_on": ["13"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "126-142",
+      "reason": "State machine patterns for position management"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "Pyramid state machine: no_position -> primary_entry -> (optional) pyramid_entry -> closing",
+    "Max 2 entries per position (configurable)",
+    "Pyramid trigger conditions (dip detection, additional signal)",
+    "Pyramid sizing (first entry %, second entry % of total)",
+    "Average entry price calculation across pyramid entries",
+    "Pyramid position tracking in portfolio"
+  ],
+  "deliverables": [
+    "src/strategies/pyramid/__init__.py",
+    "src/strategies/pyramid/state_machine.py",
+    "src/strategies/pyramid/triggers.py",
+    "src/strategies/pyramid/sizing.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "strategy-framework"
+}

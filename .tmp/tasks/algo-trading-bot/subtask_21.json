@@ -1,0 +1,36 @@
+{
+  "id": "algo-trading-bot-21",
+  "seq": "21",
+  "title": "Neural net model architecture",
+  "status": "pending",
+  "depends_on": ["20"],
+  "parallel": false,
+  "suggested_agent": "CoderAgent",
+  "context_files": [
+    {
+      "path": ".opencode/context/core/standards/code-quality.md",
+      "lines": "126-142",
+      "reason": "Model architecture patterns"
+    }
+  ],
+  "reference_files": [],
+  "acceptance_criteria": [
+    "LSTM-based model for sequence prediction (PyTorch)",
+    "1D-CNN for local pattern detection",
+    "Feature input layer matching feature extractor output",
+    "Signal strength output head (0-1 regression)",
+    "Direction output head (long/short classification)",
+    "Model configuration (hidden_size, num_layers, dropout)",
+    "Model save/load for inference"
+  ],
+  "deliverables": [
+    "src/ml/models/__init__.py",
+    "src/ml/models/lstm_model.py",
+    "src/ml/models/cnn_model.py",
+    "src/ml/models/heads.py",
+    "src/ml/models/config.py"
+  ],
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "ml-pipeline"
+}

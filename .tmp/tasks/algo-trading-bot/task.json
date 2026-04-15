@@ -1,0 +1,29 @@
+{
+  "id": "algo-trading-bot",
+  "name": "Algo Trading Bot for Crypto",
+  "status": "active",
+  "objective": "Build crypto algo trading bot with WebSocket market data, multi-strategy framework, backtesting, and neural net signal enhancement",
+  "context_files": [
+    ".opencode/context/core/standards/code-quality.md",
+    ".opencode/context/development/principles/clean-code.md"
+  ],
+  "reference_files": [
+    ".tmp/external-context/kucoin/websocket-market-data.md",
+    ".tmp/external-context/kucoin/authentication.md",
+    ".tmp/external-context/kucoin/rate-limits.md"
+  ],
+  "exit_criteria": [
+    "All tests passing",
+    "Backtesting produces realistic results with slippage modeling",
+    "Neural net can be trained and produces signal strength predictions",
+    "Example strategies demonstrate pyramid entries and parallel execution",
+    "Portfolio management with dynamic position sizing works correctly"
+  ],
+  "subtask_count": 25,
+  "completed_count": 0,
+  "created_at": "2026-04-14T00:00:00Z",
+  "bounded_context": "trading",
+  "module": "algo-trading-bot",
+  "vertical_slice": "full-stack-trading-system",
+  "release_slice": "v1.0.0"
+}

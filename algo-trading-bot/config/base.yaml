@@ -1,0 +1,58 @@
+# Algo Trading Bot Configuration
+
+# Exchange API settings
+exchanges:
+  kucoin:
+    enabled: true
+    websocket_url: "wss://ws-api.kucoin.com"
+    rest_url: "https://api.kucoin.com"
+    rate_limit: 100
+  
+  bybit:
+    enabled: true
+    websocket_url: "wss://stream.bybit.com/v5/public/spot"
+    rest_url: "https://api.bybit.com"
+    rate_limit: 100
+
+# Database settings
+database:
+  path: "data/trading.db"
+  backup_enabled: true
+  backup_interval_seconds: 3600
+
+# Trading engine settings
+trading:
+  max_position_size: 0.1
+  max_total_exposure: 0.5
+  default_slippage_bps: 10
+  order_timeout_seconds: 30
+
+# Strategy settings
+strategies:
+  parallel_enabled: true
+  pyramid_enabled: true
+  max_pyramid_entries: 2
+  volatility_window: 20
+  max_volatility_threshold: 0.05
+
+# Backtest settings
+backtest:
+  initial_capital: 100000
+  commission_bps: 5
+  slippage_model: "volume_based"
+  data_start_date: "2024-01-01"
+
+# ML settings
+ml:
+  feature_window: 100
+  prediction_horizon: 10
+  model_save_path: "models/signal_predictor.pt"
+  training_batch_size: 256
+  epochs: 100
+
+# Logging settings
+logging:
+  level: "INFO"
+  format: "json"
+  output: "stdout"
+  file_path: "logs/trading.log"

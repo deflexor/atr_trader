@@ -5,7 +5,7 @@ Predicts signal strength based on engineered features.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import logging
 
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class ModelConfig:
     """Neural network configuration."""
 
-    input_size: int = 60  # window_size
+    num_features: int = 13  # features per timestep (price, volume, indicators, etc.)
     hidden_dims: list[int] = field(default_factory=lambda: [128, 64, 32])
     output_size: int = 1  # Signal strength prediction
     dropout: float = 0.2
@@ -45,8 +45,9 @@ class SignalPredictor(nn.Module):
         super().__init__()
         self.config = config or ModelConfig()
 
-        # Calculate input size per timestep
-        self.num_features = 13  # Based on FeatureEngine defaults
+        # Determine number of features from config or use default
+        # input_size in config represents features per timestep (not window size)
+        self.num_features = getattr(self.config, "num_features", 13) or 13
 
         # LSTM layer for temporal patterns
         self.lstm = nn.LSTM(

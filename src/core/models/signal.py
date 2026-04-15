@@ -42,7 +42,7 @@ class Signal:
     @property
     def is_actionable(self) -> bool:
         """Check if signal is strong enough to act on."""
-        return self.strength >= 0.6 and self.confidence >= 0.5
+        return self.strength >= 0.5 and self.confidence >= 0.4
 
     @property
     def urgency(self) -> str:

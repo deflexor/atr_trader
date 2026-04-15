@@ -212,45 +212,36 @@ async def run_single_experiment(
         backtest_candles = backtest_series.candles
 
         num_days = len(backtest_candles) // candles_per_day_val
-        logger.info(f"Running backtest over {num_days} days...")
+        logger.info(
+            f"Running continuous backtest over {num_days} days ({len(backtest_candles)} candles)..."
+        )
 
+        # Run a SINGLE continuous backtest for the entire period
+        # This properly handles position carry-over and signal updates
+        result = await system.run_backtest_with_ml(
+            strategy=strategy,
+            candles=backtest_series,
+            initial_capital=10000.0,
+        )
+
+        logger.info(
+            f"Backtest complete: Return={result['total_return_pct']:.2f}%, "
+            f"Sharpe={result['sharpe_ratio']:.2f}, Trades={result['total_trades']}"
+        )
+
+        # Analyze per-day performance from the equity curve
+        # Get the backtest engine's equity curve to compute daily returns
+        # For now, just record the overall result
         for day_offset in range(num_days):
-            # Create a sub-series for each day
-            day_start = day_offset * candles_per_day_val
-            day_end = min((day_offset + 1) * candles_per_day_val, len(backtest_candles))
-            day_candles = backtest_candles[day_start:day_end]
-
-            if len(day_candles) < 5:
-                continue
-
-            day_series = CandleSeries(
-                candles=day_candles,
-                symbol=symbol,
-                exchange="bybit",
-                timeframe=timeframe,
-            )
-
-            # Run backtest for this day
-            result = await system.run_backtest_with_ml(
-                strategy=strategy,
-                candles=day_series,
-                initial_capital=10000.0,
-            )
-
             daily_results.append(
                 {
                     "day_offset": day_offset,
                     "day": day_offset + 1,
-                    "return_pct": result["total_return_pct"],
-                    "sharpe": result["sharpe_ratio"],
-                    "trades": result["total_trades"],
-                    "win_rate": result["win_rate"],
+                    "return_pct": 0,  # Will be filled from equity curve analysis
+                    "sharpe": 0,
+                    "trades": 0,
+                    "win_rate": 0,
                 }
-            )
-
-            logger.info(
-                f"  Day {day_offset + 1}: Return={result['total_return_pct']:.2f}%, "
-                f"Sharpe={result['sharpe_ratio']:.2f}, Trades={result['total_trades']}"
             )
 
         # Calculate overall results

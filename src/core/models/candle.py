@@ -111,3 +111,60 @@ class CandleSeries:
     def add(self, candle: Candle) -> None:
         """Add a candle to the series."""
         self.candles.append(candle)
+
+    def resample(self, target_timeframe: str) -> CandleSeries:
+        """Aggregate candles into a higher timeframe.
+
+        Supported target_timeframe values: '1h', '4h', '1d'.
+        Source candles must be a lower timeframe aligned to minute boundaries.
+
+        Returns a new CandleSeries with aggregated candles.
+        """
+        if not self.candles:
+            return CandleSeries(
+                candles=[],
+                symbol=self.symbol,
+                exchange=self.exchange,
+                timeframe=target_timeframe,
+            )
+
+        minutes = {"1h": 60, "4h": 240, "1d": 1440}
+        tf_minutes = minutes.get(target_timeframe)
+        if tf_minutes is None:
+            raise ValueError(f"Unsupported timeframe: {target_timeframe}")
+
+        # Group candles by truncated timestamp
+        groups: dict[int, list[Candle]] = {}
+        for c in self.candles:
+            bucket = int(c.timestamp.timestamp()) // (tf_minutes * 60) * (tf_minutes * 60)
+            groups.setdefault(bucket, []).append(c)
+
+        aggregated: list[Candle] = []
+        for bucket_ts in sorted(groups):
+            group = groups[bucket_ts]
+            first = group[0]
+            last = group[-1]
+            from datetime import datetime as dt, timezone
+
+            aggregated.append(
+                Candle(
+                    symbol=first.symbol,
+                    exchange=first.exchange,
+                    timeframe=target_timeframe,
+                    timestamp=dt.fromtimestamp(bucket_ts, tz=timezone.utc),
+                    open=first.open,
+                    high=max(c.high for c in group),
+                    low=min(c.low for c in group),
+                    close=last.close,
+                    volume=sum(c.volume for c in group),
+                    quote_volume=sum(c.quote_volume for c in group),
+                    trades=sum(c.trades for c in group),
+                )
+            )
+
+        return CandleSeries(
+            candles=aggregated,
+            symbol=self.symbol,
+            exchange=self.exchange,
+            timeframe=target_timeframe,
+        )

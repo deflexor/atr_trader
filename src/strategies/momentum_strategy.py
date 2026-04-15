@@ -45,6 +45,12 @@ class MomentumConfig(StrategyConfig):
     rsi_divergence_lookback: int = 5  # Candles to check for divergence
     entry_candle_required: bool = True  # Require bullish/bearish entry candle
 
+    # Multi-timeframe confirmation
+    mtf_enabled: bool = True  # Filter entries against higher-timeframe trend
+    mtf_timeframe: str = "1h"  # Higher timeframe to use
+    mtf_ema_fast: int = 3  # Fast EMA on higher timeframe (responsive)
+    mtf_ema_slow: int = 8  # Slow EMA on higher timeframe (responsive)
+
 
 class MomentumStrategy(BaseStrategy):
     """Trend-following momentum strategy.
@@ -57,6 +63,10 @@ class MomentumStrategy(BaseStrategy):
     def __init__(self, config: Optional[MomentumConfig] = None):
         super().__init__(config or MomentumConfig(name="momentum"))
         self.momentum_config = config or MomentumConfig(name="momentum")
+        self._mtf_hour_bucket: int = -1
+        self._mtf_resampled: list[list[float]] = []  # [[o, h, l, c, v], ...]
+        self._mtf_symbol: str = ""
+        self._mtf_exchange: str = ""
 
     def calculate_ema(self, prices: list[float], period: int) -> Optional[float]:
         """Calculate EMA value."""
@@ -237,6 +247,64 @@ class MomentumStrategy(BaseStrategy):
         prev = candles.candles[-2]
         return prev.low if is_long else prev.high
 
+    def _check_mtf_trend(
+        self,
+        candles: CandleSeries,
+        is_long: bool,
+        timeframe: str,
+        ema_fast_period: int,
+        ema_slow_period: int,
+    ) -> bool:
+        """Check if higher-timeframe trend aligns with entry direction.
+
+        Incrementally builds 1h candles from 5m data to avoid O(n²) resampling.
+        Only appends a new 1h bar when the candle count crosses into a new hour bucket.
+
+        Returns True if MTF trend confirms the entry direction.
+        """
+        n = len(candles.candles)
+        current_bucket = n // 12
+
+        # Incrementally add new 1h bars as they complete
+        while len(self._mtf_resampled) < current_bucket:
+            start_idx = len(self._mtf_resampled) * 12
+            end_idx = min(start_idx + 12, n)
+            if end_idx - start_idx < 1:
+                break
+
+            group = candles.candles[start_idx:end_idx]
+            self._mtf_resampled.append(
+                [
+                    group[0].open,
+                    max(c.high for c in group),
+                    min(c.low for c in group),
+                    group[-1].close,
+                    sum(c.volume for c in group),
+                ]
+            )
+
+        # Add the current incomplete hour bar
+        partial_start = current_bucket * 12
+        closes_1h = [bar[3] for bar in self._mtf_resampled]
+        if partial_start < n:
+            partial = candles.candles[partial_start:n]
+            if partial:
+                closes_1h.append(partial[-1].close)
+
+        if len(closes_1h) < ema_slow_period:
+            return True  # Not enough higher-TF data
+
+        ema_f = self.calculate_ema(closes_1h, ema_fast_period)
+        ema_s = self.calculate_ema(closes_1h, ema_slow_period)
+
+        if ema_f is None or ema_s is None:
+            return True
+
+        if is_long:
+            return ema_f > ema_s
+        else:
+            return ema_f < ema_s
+
     async def generate_signal(
         self,
         symbol: str,
@@ -333,6 +401,15 @@ class MomentumStrategy(BaseStrategy):
 
         # --- Pullback / patience filters ---
         if direction != SignalDirection.NEUTRAL:
+            # 0. Multi-timeframe: 1h trend must confirm direction
+            if cfg.mtf_enabled:
+                if not self._check_mtf_trend(
+                    candles, is_long, cfg.mtf_timeframe, cfg.mtf_ema_fast, cfg.mtf_ema_slow
+                ):
+                    direction = SignalDirection.NEUTRAL
+                    strength = 0.0
+                    confidence = 0.0
+
             # 1. Pullback: wait for price to dip toward fast EMA
             if cfg.pullback_enabled and ema_fast is not None:
                 if not self._check_pullback(

@@ -29,6 +29,8 @@ class BacktestConfig:
     slippage_type: str = "volume"  # volume or orderbook
     slippage_factor: float = 0.0003  # 0.03% slippage
     max_positions: int = 3
+    pyramid_entries: int = 2  # Allow up to N entries per position (pyramiding)
+    entry_spacing: float = 0.005  # Price must pullback 0.5% from extreme before 2nd entry
     risk_per_trade: float = 0.02  # 2% of capital per trade
     stop_loss_pct: float = 0.02  # 2% stop loss (fallback)
     take_profit_pct: float = 0.04  # 4% take profit (fallback, 2:1 R:R)
@@ -298,13 +300,72 @@ class BacktestEngine:
         visible_candles: Optional[CandleSeries] = None,
     ) -> None:
         """Process trading signal and execute orders."""
-        # Don't open if we already have a position in this direction
-        same_direction = any(
-            (p.side == "long" and signal.direction == SignalDirection.LONG)
-            or (p.side == "short" and signal.direction == SignalDirection.SHORT)
-            for p in self.positions
+        is_long = signal.direction == SignalDirection.LONG
+        side_str = "long" if is_long else "short"
+
+        # Check if we already have a position in this direction
+        existing = next(
+            (p for p in self.positions if p.side == side_str),
+            None,
         )
-        if same_direction:
+
+        if existing is not None:
+            # Pyramid entry: add if we haven't exceeded entry limit
+            if len(existing.entries) >= self.config.pyramid_entries:
+                return
+
+            # Check entry_spacing pullback: price must have pulled back from extreme
+            extreme = existing.highest_price if is_long else existing.lowest_price
+            if extreme == 0:
+                return
+            if is_long:
+                retrace_pct = (extreme - signal.price) / extreme
+            else:
+                retrace_pct = (signal.price - extreme) / extreme
+
+            if retrace_pct < self.config.entry_spacing:
+                return  # Not enough pullback for 2nd entry
+
+            # Calculate fill price for pyramid entry
+            fill_price = self.fill_simulator.calculate_fill_price(
+                signal.price, is_long, candle.volume
+            )
+
+            # Same quantity as first entry (don't double up risk)
+            quantity = existing.total_quantity
+
+            # Check capital
+            required_capital = fill_price * quantity
+            if self.capital < required_capital:
+                quantity = self.capital * 0.95 / fill_price
+                if quantity <= 0:
+                    return
+
+            # Add pyramid entry leg
+            existing.add_entry(fill_price, quantity)
+            existing.update_price(fill_price)
+
+            # Deduct additional capital
+            cost = fill_price * quantity
+            commission_cost = cost * self.config.commission
+            self.capital -= cost + commission_cost
+
+            # Log pyramid entry
+            self.trades.append(
+                {
+                    "timestamp": candle.timestamp,
+                    "symbol": signal.symbol,
+                    "side": signal.direction.value,
+                    "entry_price": fill_price,
+                    "quantity": quantity,
+                    "commission": commission_cost,
+                    "signal_strength": signal.strength,
+                    "stop_loss": existing.stop_loss,
+                    "take_profit": existing.take_profit,
+                    "pyramid_entry": True,
+                    "entry_number": len(existing.entries),
+                }
+            )
             return
 
         # Check if we can open new position
@@ -337,7 +398,7 @@ class BacktestEngine:
         # Calculate fill price with slippage
         fill_price = self.fill_simulator.calculate_fill_price(
             signal.price,
-            signal.direction == SignalDirection.LONG,
+            is_long,
             candle.volume,
         )
 
@@ -346,8 +407,6 @@ class BacktestEngine:
             atr = self._calculate_atr(visible_candles, self.config.atr_period)
         else:
             atr = None
-
-        is_long = signal.direction == SignalDirection.LONG
 
         if atr and atr > 0:
             sl_distance = atr * self.config.atr_sl_multiplier
@@ -367,7 +426,7 @@ class BacktestEngine:
         position = Position(
             symbol=signal.symbol,
             exchange=signal.exchange,
-            side="long" if is_long else "short",
+            side=side_str,
             quantity=quantity,
             entry_price=fill_price,
             current_price=fill_price,
@@ -395,6 +454,8 @@ class BacktestEngine:
                 "signal_strength": signal.strength,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
+                "pyramid_entry": False,
+                "entry_number": 1,
             }
         )
 

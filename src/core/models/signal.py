@@ -41,8 +41,13 @@ class Signal:
 
     @property
     def is_actionable(self) -> bool:
-        """Check if signal is strong enough to act on."""
-        return self.strength >= 0.5 and self.confidence >= 0.4
+        """Check if signal is strong enough to act on.
+
+        Lowered threshold from 0.5 to 0.3 to accommodate ML enhancer:
+        when ML disagrees, combined_strength = base * 0.7, so a 0.6 base
+        becomes 0.42 — below the old 0.5 cutoff but still a valid trade.
+        """
+        return self.strength >= 0.3 and self.confidence >= 0.2
 
     @property
     def urgency(self) -> str:

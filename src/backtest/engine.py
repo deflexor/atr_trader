@@ -306,10 +306,13 @@ class BacktestEngine:
         if len(self.positions) >= self.config.max_positions:
             return
 
-        # Position sizing: risk a percentage of capital per trade
+        # Position sizing: scale risk by signal strength/confidence
+        # Strong signals (ML agrees) → larger position; weak signals → smaller
         quantity = signal.quantity
         if quantity <= 0 and signal.price > 0:
-            position_value = self.capital * self.config.risk_per_trade
+            # Scale risk by combined strength to size up on high-confidence entries
+            effective_risk = self.config.risk_per_trade * max(signal.strength, 0.3)
+            position_value = self.capital * effective_risk
             quantity = position_value / signal.price
 
         if quantity <= 0:

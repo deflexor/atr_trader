@@ -34,7 +34,7 @@ from ..core.models.market_data import MarketData
 #   - mtf_enabled OFF by default (1h confirmation was another strict gate)
 ASSET_PROFILES: dict[str, dict] = {
     "BTC": {
-        "atr_filter_min_pct": 0.0015,
+        "atr_filter_min_pct": 0.001,
         "min_agreement": 3,
         "momentum_threshold": 0.005,
         "pullback_enabled": False,
@@ -43,7 +43,7 @@ ASSET_PROFILES: dict[str, dict] = {
         "mtf_enabled": False,
     },
     "ETH": {
-        "atr_filter_min_pct": 0.002,
+        "atr_filter_min_pct": 0.001,
         "min_agreement": 3,
         "momentum_threshold": 0.005,
         "pullback_enabled": False,
@@ -52,7 +52,7 @@ ASSET_PROFILES: dict[str, dict] = {
         "mtf_enabled": False,
     },
     "DOGE": {
-        "atr_filter_min_pct": 0.003,
+        "atr_filter_min_pct": 0.002,
         "min_agreement": 3,
         "momentum_threshold": 0.005,
         "pullback_enabled": False,
@@ -61,7 +61,7 @@ ASSET_PROFILES: dict[str, dict] = {
         "mtf_enabled": False,
     },
     "TRX": {
-        "atr_filter_min_pct": 0.002,
+        "atr_filter_min_pct": 0.001,
         "min_agreement": 3,
         "momentum_threshold": 0.005,
         "pullback_enabled": False,
@@ -154,7 +154,7 @@ class MomentumConfig(StrategyConfig):
 
     # Volatility filter
     atr_filter_enabled: bool = True  # Skip entries in low-vol conditions
-    atr_filter_min_pct: float = 0.002  # Min ATR as % of price (0.2%) to enter
+    atr_filter_min_pct: float = 0.001  # Min ATR as % of price (0.1%) to enter (was 0.2%)
 
     # Regime selection: overrides asset-base lookup when set
     # e.g. "BTC_AGGRESSIVE", "BTC_CONSERVATIVE", "ETH_AGGRESSIVE"

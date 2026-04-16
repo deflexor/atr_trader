@@ -12,7 +12,7 @@ Uses:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import statistics
 
@@ -20,6 +20,42 @@ from .base_strategy import BaseStrategy, StrategyConfig
 from ..core.models.signal import Signal, SignalDirection
 from ..core.models.candle import CandleSeries
 from ..core.models.market_data import MarketData
+
+
+# Preset profiles keyed by quote-agnostic base (e.g. "BTC", "ETH", "DOGE", "TRX")
+# Values override MomentumConfig defaults for that asset class.
+ASSET_PROFILES: dict[str, dict] = {
+    "BTC": {
+        "atr_filter_min_pct": 0.0015,
+        "min_agreement": 3,
+        "momentum_threshold": 0.003,
+        "pullback_retrace_min": 0.002,
+    },
+    "ETH": {
+        "atr_filter_min_pct": 0.002,
+        "min_agreement": 3,
+        "momentum_threshold": 0.004,
+        "pullback_retrace_min": 0.003,
+    },
+    "DOGE": {
+        "atr_filter_min_pct": 0.003,
+        "min_agreement": 2,
+        "momentum_threshold": 0.005,
+        "pullback_retrace_min": 0.004,
+    },
+    "TRX": {
+        "atr_filter_min_pct": 0.002,
+        "min_agreement": 2,
+        "momentum_threshold": 0.004,
+        "pullback_retrace_min": 0.003,
+    },
+}
+
+
+def _asset_base(symbol: str) -> str:
+    """Extract base asset from symbol (BTCUSDT -> BTC, DOGE-USDT -> DOGE)."""
+    base = symbol.upper().replace("-", "").replace("USDT", "").replace("BUSD", "")
+    return base
 
 
 @dataclass
@@ -38,10 +74,12 @@ class MomentumConfig(StrategyConfig):
     min_agreement: int = 3  # Minimum indicators that must agree (of 5)
 
     # Pullback / patience settings
-    pullback_enabled: bool = True  # Wait for pullback within trend
+    pullback_enabled: bool = False  # Wait for pullback within trend (disabled: too restrictive)
     pullback_lookback: int = 10  # Look back N candles for the recent extreme
     pullback_retrace_min: float = 0.003  # Must have retraced at least 0.3% from extreme
-    rsi_divergence_enabled: bool = True  # Skip when RSI diverges from price
+    rsi_divergence_enabled: bool = (
+        False  # Skip when RSI diverges from price (disabled: too restrictive)
+    )
     rsi_divergence_lookback: int = 5  # Candles to check for divergence
     entry_candle_required: bool = True  # Require bullish/bearish entry candle
 
@@ -67,10 +105,27 @@ class MomentumStrategy(BaseStrategy):
     def __init__(self, config: Optional[MomentumConfig] = None):
         super().__init__(config or MomentumConfig(name="momentum"))
         self.momentum_config = config or MomentumConfig(name="momentum")
+        self._asset_overrides: dict[str, MomentumConfig] = {}
         self._mtf_hour_bucket: int = -1
         self._mtf_resampled: list[list[float]] = []  # [[o, h, l, c, v], ...]
         self._mtf_symbol: str = ""
         self._mtf_exchange: str = ""
+
+    def _config_for_symbol(self, symbol: str) -> MomentumConfig:
+        """Return MomentumConfig with asset-specific overrides applied."""
+        base = _asset_base(symbol)
+        if base in self._asset_overrides:
+            return self._asset_overrides[base]
+
+        profile = ASSET_PROFILES.get(base)
+        if profile is None:
+            return self.momentum_config
+
+        import dataclasses
+
+        overrides = dataclasses.replace(self.momentum_config, **profile)
+        self._asset_overrides[base] = overrides
+        return overrides
 
     def calculate_ema(self, prices: list[float], period: int) -> Optional[float]:
         """Calculate EMA value."""
@@ -374,9 +429,12 @@ class MomentumStrategy(BaseStrategy):
                 strategy_id=self.config.name,
             )
 
+        # Resolve per-asset config
+        cfg = self._config_for_symbol(symbol)
+
         # --- Volatility filter: skip choppy markets ---
-        if self.momentum_config.atr_filter_enabled:
-            if not self._check_volatility_filter(candles, self.momentum_config.atr_filter_min_pct):
+        if cfg.atr_filter_enabled:
+            if not self._check_volatility_filter(candles, cfg.atr_filter_min_pct):
                 return Signal(
                     symbol=symbol,
                     exchange=candles.exchange or "kucoin",
@@ -387,7 +445,6 @@ class MomentumStrategy(BaseStrategy):
                 )
 
         closes = candles.closes
-        cfg = self.momentum_config
 
         # Calculate indicators
         ema_fast = self.calculate_ema(closes, cfg.ema_fast)

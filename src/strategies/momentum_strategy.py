@@ -166,6 +166,12 @@ class MomentumConfig(StrategyConfig):
     # e.g. "BTC_AGGRESSIVE", "BTC_CONSERVATIVE", "ETH_AGGRESSIVE"
     regime: str = ""  # Empty = auto-detect from symbol
 
+    # Auto-regime detection (volatility-based)
+    regime_detection: bool = False  # Enable ATR-percentile-based regime switching
+    regime_atr_lookback: int = 100  # Lookback for ATR percentile
+    regime_high_percentile: float = 0.80  # Above this → conservative
+    regime_low_percentile: float = 0.20  # Below this → aggressive
+
 
 class MomentumStrategy(BaseStrategy):
     """Trend-following momentum strategy.
@@ -413,6 +419,55 @@ class MomentumStrategy(BaseStrategy):
 
         return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
 
+    def detect_regime(self, candles: CandleSeries) -> str:
+        """Detect market regime based on ATR percentile.
+
+        High volatility (ATR > high_percentile of history) → CONSERVATIVE
+        Low volatility (ATR < low_percentile of history) → AGGRESSIVE
+        Middle → DEFAULT (use standard profile)
+
+        Returns "AGGRESSIVE", "CONSERVATIVE", or "" (use default).
+        """
+        high_p = self.momentum_config.regime_high_percentile
+        low_p = self.momentum_config.regime_low_percentile
+        min_data = 50  # Minimum candles needed
+
+        n = len(candles.candles)
+        if n < min_data + 14:
+            return ""  # Insufficient data
+
+        # Compute ATR % series over ALL available history (not just a fixed window)
+        atr_pcts = []
+        for i in range(14, n):
+            atr = self._calculate_atr(
+                CandleSeries(
+                    candles=candles.candles[i - 14 : i + 1],
+                    symbol=candles.symbol,
+                    exchange=candles.exchange,
+                    timeframe=candles.timeframe,
+                ),
+                period=14,
+            )
+            price = candles.candles[i].close
+            if price > 0:
+                atr_pcts.append(atr / price)
+
+        if len(atr_pcts) < 20:
+            return ""
+
+        current_atr_pct = atr_pcts[-1]
+
+        # Percentile: what fraction of history was below current
+        below_count = sum(1 for v in atr_pcts[:-1] if v < current_atr_pct)
+        percentile = below_count / (len(atr_pcts) - 1)
+
+        if percentile > high_p:
+            return "CONSERVATIVE"
+        elif percentile < low_p:
+            return "AGGRESSIVE"
+        else:
+            return ""  # Middle → default profile
+
     def _check_volatility_filter(
         self,
         candles: CandleSeries,
@@ -517,6 +572,13 @@ class MomentumStrategy(BaseStrategy):
 
         # Track diagnostics
         self.diagnostics["total_evaluated"] += 1
+
+        # Auto-regime detection: set regime before config resolution if enabled
+        if self.momentum_config.regime_detection and not self.momentum_config.regime:
+            detected = self.detect_regime(candles)
+            if detected:
+                base = _asset_base(symbol)
+                self.momentum_config.regime = f"{base}_{detected}"
 
         # Resolve per-asset config
         cfg = self._config_for_symbol(symbol)

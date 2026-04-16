@@ -260,12 +260,12 @@ class TradingSystem:
         actual_num_features = self.feature_engine.num_features
         model_cfg = ModelConfig(
             num_features=actual_num_features,
-            hidden_dims=[128, 64, 32],
+            hidden_dims=[128, 64, 32],  # Full model
             num_classes=3,
             dropout=0.3,
             learning_rate=0.001,
-            batch_size=256,
-            epochs=20,
+            batch_size=128,
+            epochs=5,  # Fast for CPU
             threshold_pct=0.005,
         )
 

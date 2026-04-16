@@ -38,12 +38,12 @@ class ModelConfig:
     """Neural network configuration."""
 
     num_features: int = 13  # features per timestep
-    hidden_dims: list[int] = field(default_factory=lambda: [128, 64, 32])
+    hidden_dims: list[int] = field(default_factory=lambda: [128, 64, 32])  # Full model
     num_classes: int = 3  # DOWN, FLAT, UP
     dropout: float = 0.3  # higher dropout for classification
     learning_rate: float = 0.001
-    batch_size: int = 256
-    epochs: int = 50
+    batch_size: int = 128  # Smaller batches for CPU
+    epochs: int = 5  # Few epochs for CPU speed
     # Classification threshold: price must move > this fraction to count as UP/DOWN
     threshold_pct: float = 0.005
 
@@ -94,8 +94,10 @@ class SignalClassifier(nn.Module):
         self.output = nn.Linear(prev_dim, self.config.num_classes)
         self.softmax = nn.Softmax(dim=1)
 
-        # Loss and optimizer
-        self.loss_fn = nn.CrossEntropyLoss()
+        # Loss and optimizer — use class weights to handle FLAT dominance (91% of labels)
+        # Inverse frequency weighting: rare classes get higher weight
+        # Will be set properly in train_model() once class distribution is known
+        self.loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 0.1, 1.0]))  # Downweight FLAT
         self.optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.config.learning_rate,
@@ -167,6 +169,16 @@ class SignalClassifier(nn.Module):
 
         X_train = torch.FloatTensor(train_features)  # features are float32
         y_train = torch.LongTensor(train_labels)  # labels are int (0,1,2)
+
+        # Recompute class weights from actual distribution to handle FLAT dominance
+        class_counts = np.bincount(train_labels, minlength=3)
+        total = len(train_labels)
+        # Inverse frequency: rare classes get higher weight
+        weights = []
+        for count in class_counts:
+            w = total / (3 * count) if count > 0 else 1.0
+            weights.append(min(w, 10.0))  # Cap at 10x to avoid extreme values
+        self.loss_fn = nn.CrossEntropyLoss(weight=torch.tensor(weights, dtype=torch.float32))
 
         dataset = torch.utils.data.TensorDataset(X_train, y_train)
         dataloader = torch.utils.data.DataLoader(

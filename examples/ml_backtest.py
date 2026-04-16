@@ -44,7 +44,9 @@ async def main():
         choices=["momentum", "mean_reversion"],
         help="Strategy to backtest",
     )
-    parser.add_argument("--epochs", type=int, default=50, help="ML training epochs")
+    parser.add_argument(
+        "--epochs", type=int, default=10, help="ML training epochs (10 for CPU, 50 for GPU)"
+    )
     args = parser.parse_args()
 
     print("=" * 60)

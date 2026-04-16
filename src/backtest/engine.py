@@ -91,6 +91,9 @@ class BacktestEngine:
         self.start_time: Optional[datetime] = None
         self.end_time: Optional[datetime] = None
         self._last_trade_candle: int = -999  # Cooldown tracking
+        # Anti-martingale: scale risk by recent win/loss streak
+        self._consecutive_losses: int = 0
+        self._current_risk_multiplier: float = 1.0  # 1.0=normal, <1 after losses
 
     def reset(self) -> None:
         """Reset backtest state for new run."""
@@ -102,6 +105,8 @@ class BacktestEngine:
         self.end_time = None
         self._last_trade_candle = -999
         self.metrics.reset()
+        self._consecutive_losses = 0
+        self._current_risk_multiplier = 1.0
 
     def _calculate_atr(self, candles: CandleSeries, period: int = 14) -> Optional[float]:
         """Calculate Average True Range for dynamic stop sizing."""
@@ -306,12 +311,15 @@ class BacktestEngine:
         if len(self.positions) >= self.config.max_positions:
             return
 
-        # Position sizing: scale risk by signal strength/confidence
+        # Position sizing: scale by signal strength AND anti-martingale streak
         # Strong signals (ML agrees) → larger position; weak signals → smaller
+        # After losses → smaller position; after wins → larger position
         quantity = signal.quantity
         if quantity <= 0 and signal.price > 0:
-            # Scale risk by combined strength to size up on high-confidence entries
-            effective_risk = self.config.risk_per_trade * max(signal.strength, 0.3)
+            signal_risk = max(signal.strength, 0.3)
+            effective_risk = (
+                self.config.risk_per_trade * signal_risk * self._current_risk_multiplier
+            )
             position_value = self.capital * effective_risk
             quantity = position_value / signal.price
 
@@ -427,6 +435,15 @@ class BacktestEngine:
         # Update capital: return the position's value minus commission
         entry_value = position.avg_entry_price * position.total_quantity
         self.capital += entry_value + net_pnl
+
+        # Anti-martingale: update streak after close
+        if net_pnl > 0:
+            self._consecutive_losses = 0
+            self._current_risk_multiplier = min(1.5, self._current_risk_multiplier * 1.25)
+        else:
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= 2:
+                self._current_risk_multiplier = max(0.3, self._current_risk_multiplier * 0.5)
 
         # Record trade
         self.trades.append(

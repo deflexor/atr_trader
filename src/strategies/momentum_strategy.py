@@ -33,11 +33,13 @@ from ..core.models.market_data import MarketData
 #   - entry_candle_required OFF (was rejecting valid signals on doji candles)
 #   - mtf_enabled OFF by default (1h confirmation was another strict gate)
 ASSET_PROFILES: dict[str, dict] = {
+    # Default profiles: pullback enabled (0.1% retrace), no other restrictive filters
     "BTC": {
         "atr_filter_min_pct": 0.001,
         "min_agreement": 3,
         "momentum_threshold": 0.005,
-        "pullback_enabled": False,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.005,  # 0.5% pullback — best performing
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
@@ -46,7 +48,8 @@ ASSET_PROFILES: dict[str, dict] = {
         "atr_filter_min_pct": 0.001,
         "min_agreement": 3,
         "momentum_threshold": 0.005,
-        "pullback_enabled": False,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.005,
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
@@ -55,7 +58,8 @@ ASSET_PROFILES: dict[str, dict] = {
         "atr_filter_min_pct": 0.002,
         "min_agreement": 3,
         "momentum_threshold": 0.005,
-        "pullback_enabled": False,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.006,  # slightly more for volatile assets
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
@@ -64,13 +68,44 @@ ASSET_PROFILES: dict[str, dict] = {
         "atr_filter_min_pct": 0.001,
         "min_agreement": 3,
         "momentum_threshold": 0.005,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.005,
+        "rsi_divergence_enabled": False,
+        "entry_candle_required": False,
+        "mtf_enabled": False,
+    },
+    # Conservative profiles: tighter pullback, more agreement, entry candle confirmation
+    "BTC_CONSERVATIVE": {
+        "atr_filter_min_pct": 0.001,
+        "min_agreement": 4,
+        "momentum_threshold": 0.006,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.005,
+        "rsi_divergence_enabled": True,
+        "entry_candle_required": True,
+        "mtf_enabled": True,
+    },
+    "ETH_CONSERVATIVE": {
+        "atr_filter_min_pct": 0.0015,
+        "min_agreement": 4,
+        "momentum_threshold": 0.006,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.005,
+        "rsi_divergence_enabled": True,
+        "entry_candle_required": True,
+        "mtf_enabled": True,
+    },
+    # Aggressive profiles: no pullback, trade the breakout
+    "BTC_AGGRESSIVE": {
+        "atr_filter_min_pct": 0.0005,
+        "min_agreement": 2,
+        "momentum_threshold": 0.003,
         "pullback_enabled": False,
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
     },
-    # Dual-regime profiles: aggressive (trend-following) and conservative (mean-reversion bias)
-    "BTC_AGGRESSIVE": {
+    "ETH_AGGRESSIVE": {
         "atr_filter_min_pct": 0.001,
         "min_agreement": 2,
         "momentum_threshold": 0.003,
@@ -78,35 +113,6 @@ ASSET_PROFILES: dict[str, dict] = {
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
-    },
-    "BTC_CONSERVATIVE": {
-        "atr_filter_min_pct": 0.002,
-        "min_agreement": 4,
-        "momentum_threshold": 0.008,
-        "pullback_enabled": True,
-        "pullback_retrace_min": 0.004,
-        "rsi_divergence_enabled": True,
-        "entry_candle_required": True,
-        "mtf_enabled": True,
-    },
-    "ETH_AGGRESSIVE": {
-        "atr_filter_min_pct": 0.0015,
-        "min_agreement": 2,
-        "momentum_threshold": 0.003,
-        "pullback_enabled": False,
-        "rsi_divergence_enabled": False,
-        "entry_candle_required": False,
-        "mtf_enabled": False,
-    },
-    "ETH_CONSERVATIVE": {
-        "atr_filter_min_pct": 0.0025,
-        "min_agreement": 4,
-        "momentum_threshold": 0.008,
-        "pullback_enabled": True,
-        "pullback_retrace_min": 0.005,
-        "rsi_divergence_enabled": True,
-        "entry_candle_required": True,
-        "mtf_enabled": True,
     },
 }
 
@@ -133,9 +139,9 @@ class MomentumConfig(StrategyConfig):
     min_agreement: int = 3  # Minimum indicators that must agree (of 5)
 
     # Pullback / patience settings
-    pullback_enabled: bool = False  # Wait for pullback within trend (disabled: too restrictive)
+    pullback_enabled: bool = True  # Wait for pullback within trend
     pullback_lookback: int = 10  # Look back N candles for the recent extreme
-    pullback_retrace_min: float = 0.003  # Must have retraced at least 0.3% from extreme
+    pullback_retrace_min: float = 0.001  # Must have retraced at least 0.1% from extreme
     rsi_divergence_enabled: bool = (
         False  # Skip when RSI diverges from price (disabled: too restrictive)
     )
@@ -304,11 +310,13 @@ class MomentumStrategy(BaseStrategy):
     ) -> bool:
         """Check if price has pulled back within a confirmed trend.
 
-        Verifies two conditions:
+        Verifies:
         1. A recent extreme (high for longs, low for shorts) existed above/below current price
-        2. Current price has retraced toward the fast EMA from that extreme
+        2. Current price has retraced toward the EMA by at least retrace_min
 
-        This prevents entering at the TOP of a momentum push — we wait for a dip.
+        The near-EMA check is intentionally removed — conflating pullback detection
+        (price dipped from extreme) with entry confirmation (price near fair value)
+        caused over-filtering. We only check that price has actually pulled back.
         """
         if len(closes) < lookback + 1:
             return True  # Not enough data, don't block
@@ -318,18 +326,12 @@ class MomentumStrategy(BaseStrategy):
 
         if is_long:
             recent_high = max(recent)
-            # Must have pulled back from recent high
             retraced = (recent_high - current_price) / recent_high
-            # Price should be near or below fast EMA
-            near_ema = current_price <= ema_fast * (1 + retrace_min)
-            return retraced >= retrace_min and near_ema
+            return retraced >= retrace_min
         else:
             recent_low = min(recent)
-            # Must have bounced from recent low
             retraced = (current_price - recent_low) / recent_low
-            # Price should be near or above fast EMA
-            near_ema = current_price >= ema_fast * (1 - retrace_min)
-            return retraced >= retrace_min and near_ema
+            return retraced >= retrace_min
 
     def _check_rsi_divergence(
         self,
@@ -621,7 +623,7 @@ class MomentumStrategy(BaseStrategy):
                     confidence = 0.0
                     self.diagnostics["mtf_filtered"] += 1
 
-            # 1. Pullback: wait for price to dip toward fast EMA
+            # 1. Pullback: wait for price to dip from recent extreme
             if cfg.pullback_enabled and ema_fast is not None:
                 if not self._check_pullback(
                     closes, ema_fast, is_long, cfg.pullback_lookback, cfg.pullback_retrace_min

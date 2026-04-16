@@ -156,6 +156,10 @@ class MomentumConfig(StrategyConfig):
     atr_filter_enabled: bool = True  # Skip entries in low-vol conditions
     atr_filter_min_pct: float = 0.002  # Min ATR as % of price (0.2%) to enter
 
+    # Regime selection: overrides asset-base lookup when set
+    # e.g. "BTC_AGGRESSIVE", "BTC_CONSERVATIVE", "ETH_AGGRESSIVE"
+    regime: str = ""  # Empty = auto-detect from symbol
+
 
 class MomentumStrategy(BaseStrategy):
     """Trend-following momentum strategy.
@@ -188,7 +192,12 @@ class MomentumStrategy(BaseStrategy):
 
     def _config_for_symbol(self, symbol: str) -> MomentumConfig:
         """Return MomentumConfig with asset-specific overrides applied."""
-        base = _asset_base(symbol)
+        # If regime is explicitly set (e.g. "BTC_AGGRESSIVE"), use it directly
+        if self.momentum_config.regime:
+            base = self.momentum_config.regime
+        else:
+            base = _asset_base(symbol)
+
         if base in self._asset_overrides:
             return self._asset_overrides[base]
 

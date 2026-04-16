@@ -38,8 +38,8 @@ class BacktestConfig:
     atr_tp_multiplier: float = 4.0  # TP = 4x ATR (1.33:1 R:R, reachable vs old 6x)
     cooldown_candles: int = 4  # Wait 4 candles (20min on 5m) between trades
     use_trailing_stop: bool = True  # Enable trailing stops after activation
-    trailing_activation_atr: float = 0.5  # Activate after 0.5x ATR profit
-    trailing_distance_atr: float = 0.75  # Trail at 0.75x ATR behind extreme
+    trailing_activation_atr: float = 2.0  # Activate after 2x ATR profit (let trend develop)
+    trailing_distance_atr: float = 2.0  # Trail at 2x ATR behind extreme (room to breathe)
 
 
 @dataclass

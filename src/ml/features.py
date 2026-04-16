@@ -71,7 +71,7 @@ class FeatureEngine:
 
         """
         if len(candles.candles) < self.config.window_size:
-            return np.zeros((self.config.window_size, self._num_features))
+            return np.zeros((self.config.window_size, self.num_features))
 
         features = []
 

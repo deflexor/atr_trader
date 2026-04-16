@@ -193,9 +193,12 @@ class BacktestEngine:
         total_return = final_equity - self.config.initial_capital
         total_return_pct = (total_return / self.config.initial_capital) * 100
 
-        # Get metrics from trades
-        winning = [t for t in self.trades if t.get("pnl", 0) > 0]
-        losing = [t for t in self.trades if t.get("pnl", 0) <= 0]
+        # Compute performance metrics (Sharpe, drawdown, etc.) from trades + equity curve
+        close_trades = [t for t in self.trades if t.get("pnl") is not None]
+        self.metrics.calculate_from_trades(close_trades, self.equity_curve)
+
+        winning = [t for t in close_trades if t.get("pnl", 0) > 0]
+        losing = [t for t in close_trades if t.get("pnl", 0) <= 0]
 
         return BacktestResult(
             initial_capital=self.config.initial_capital,

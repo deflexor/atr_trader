@@ -53,7 +53,7 @@ class MomentumConfig(StrategyConfig):
 
     # Volatility filter
     atr_filter_enabled: bool = True  # Skip entries in low-vol conditions
-    atr_filter_min: float = 125.0  # Minimum ATR (in price units) to enter
+    atr_filter_min_pct: float = 0.002  # Min ATR as % of price (0.2%) to enter
 
 
 class MomentumStrategy(BaseStrategy):
@@ -275,21 +275,25 @@ class MomentumStrategy(BaseStrategy):
     def _check_volatility_filter(
         self,
         candles: CandleSeries,
-        atr_threshold: float,
+        atr_threshold_pct: float,
     ) -> bool:
         """Check if market volatility is sufficient for momentum entries.
 
-        Low volatility (choppy, ranging market) causes momentum strategies to
-        generate false signals at EMA boundaries. Skips entries when ATR
-        falls below the threshold.
+        Compares ATR as a percentage of current price against the threshold.
+        Works identically across assets regardless of price level.
 
         Returns True if volatility is sufficient (don't block entry).
         """
-        if atr_threshold <= 0:
+        if atr_threshold_pct <= 0:
             return True
 
         atr = self._calculate_atr(candles, period=14)
-        return atr >= atr_threshold
+        if not candles.candles or atr <= 0:
+            return False
+
+        current_price = candles.candles[-1].close
+        atr_pct = atr / current_price
+        return atr_pct >= atr_threshold_pct
 
     def _check_mtf_trend(
         self,
@@ -372,7 +376,7 @@ class MomentumStrategy(BaseStrategy):
 
         # --- Volatility filter: skip choppy markets ---
         if self.momentum_config.atr_filter_enabled:
-            if not self._check_volatility_filter(candles, self.momentum_config.atr_filter_min):
+            if not self._check_volatility_filter(candles, self.momentum_config.atr_filter_min_pct):
                 return Signal(
                     symbol=symbol,
                     exchange=candles.exchange or "kucoin",

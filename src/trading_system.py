@@ -385,35 +385,39 @@ class TradingSystem:
         # This ensures we count unrealized PnL as realized for the day's result
         if backtest_engine.positions and candles.candles:
             last_price = candles.candles[-1].close
+            last_volume = candles.candles[-1].volume
             for position in backtest_engine.positions[:]:
-                backtest_engine._close_position(position, last_price, "end_of_backtest")
+                backtest_engine._close_position(
+                    position, last_price, last_volume, "end_of_backtest"
+                )
 
             # Recalculate final metrics after closing positions
             final_equity = backtest_engine._calculate_equity(last_price)
             total_return = final_equity - initial_capital
             total_return_pct = (total_return / initial_capital) * 100
 
-            winning = [t for t in backtest_engine.trades if t.get("pnl", 0) > 0]
-            losing = [t for t in backtest_engine.trades if t.get("pnl", 0) <= 0]
+            close_trades = [t for t in backtest_engine.trades if t.get("pnl") is not None]
+            backtest_engine.metrics.calculate_from_trades(
+                close_trades, backtest_engine.equity_curve
+            )
+
+            winning = [t for t in close_trades if t.get("pnl", 0) > 0]
+            losing = [t for t in close_trades if t.get("pnl", 0) <= 0]
 
             result = type(result)(
                 initial_capital=initial_capital,
                 final_capital=final_equity,
                 total_return=total_return,
                 total_return_pct=total_return_pct,
-                max_drawdown=result.max_drawdown,
-                sharpe_ratio=result.sharpe_ratio,
-                win_rate=len(winning) / len(backtest_engine.trades)
-                if backtest_engine.trades
-                else 0,
-                total_trades=len(backtest_engine.trades),
+                max_drawdown=backtest_engine.metrics.max_drawdown,
+                sharpe_ratio=backtest_engine.metrics.sharpe_ratio,
+                win_rate=len(winning) / len(close_trades) if close_trades else 0,
+                total_trades=len(close_trades),
                 winning_trades=len(winning),
                 losing_trades=len(losing),
                 avg_win=sum(t.get("pnl", 0) for t in winning) / len(winning) if winning else 0,
                 avg_loss=sum(t.get("pnl", 0) for t in losing) / len(losing) if losing else 0,
-                avg_trade_return=total_return / len(backtest_engine.trades)
-                if backtest_engine.trades
-                else 0,
+                avg_trade_return=total_return / len(close_trades) if close_trades else 0,
                 equity_curve=backtest_engine.equity_curve,
                 trades=backtest_engine.trades,
                 duration_seconds=result.duration_seconds,

@@ -86,16 +86,52 @@ class PerformanceMetrics:
         total_losses = abs(sum(losses)) if losses else 0
         self.profit_factor = total_wins / total_losses if total_losses > 0 else 0
 
+        # Derive annualization factor from equity curve timestamps
+        trades_per_year = self._estimate_trades_per_year(trades)
+
         # Sharpe ratio
-        self.sharpe_ratio = self._calculate_sharpe(pnls, risk_free_rate)
+        self.sharpe_ratio = self._calculate_sharpe(pnls, risk_free_rate, trades_per_year)
 
         # Sortino ratio (downside deviation)
-        self.sortino_ratio = self._calculate_sortino(pnls, risk_free_rate)
+        self.sortino_ratio = self._calculate_sortino(pnls, risk_free_rate, trades_per_year)
 
         # Calmar ratio (return / max drawdown)
         if self.max_drawdown > 0:
             total_return = sum(pnls)
             self.calmar_ratio = total_return / self.max_drawdown
+
+    def _estimate_trades_per_year(self, trades: list[dict]) -> float:
+        """Estimate number of trades per year from close trade timestamps.
+
+        Returns 252 as fallback if timestamps are unusable.
+        """
+        from datetime import datetime
+
+        timestamps = []
+        for t in trades:
+            ts = t.get("timestamp")
+            if ts is None:
+                continue
+            if isinstance(ts, datetime):
+                timestamps.append(ts.timestamp())
+            elif isinstance(ts, (int, float)):
+                timestamps.append(float(ts))
+
+        if len(timestamps) < 2:
+            return 252.0
+
+        first = min(timestamps)
+        last = max(timestamps)
+        span_seconds = last - first
+
+        if span_seconds <= 0:
+            return 252.0
+
+        span_years = span_seconds / (365.25 * 24 * 3600)
+        if span_years <= 0:
+            return 252.0
+
+        return len(timestamps) / span_years
 
     def _calculate_drawdown(self, equity_curve: list[dict]) -> None:
         """Calculate maximum drawdown from equity curve."""
@@ -115,8 +151,16 @@ class PerformanceMetrics:
 
         self.max_drawdown = max_dd
 
-    def _calculate_sharpe(self, pnls: list[float], risk_free_rate: float) -> float:
-        """Calculate Sharpe ratio from PnL series."""
+    def _calculate_sharpe(
+        self, pnls: list[float], risk_free_rate: float, trades_per_year: float = 252.0
+    ) -> float:
+        """Calculate Sharpe ratio from PnL series.
+
+        Args:
+            pnls: Per-trade PnL values
+            risk_free_rate: Annual risk-free rate
+            trades_per_year: Estimated trades per year for annualization
+        """
         if len(pnls) < 2:
             return 0.0
 
@@ -128,12 +172,24 @@ class PerformanceMetrics:
         if std_return == 0:
             return 0.0
 
-        # Annualize (assuming daily trades, 252 trading days)
-        sharpe = (avg_return - risk_free_rate / 252) / std_return * math.sqrt(252)
+        # Annualize using actual trade frequency
+        sharpe = (
+            (avg_return - risk_free_rate / trades_per_year)
+            / std_return
+            * math.sqrt(trades_per_year)
+        )
         return sharpe
 
-    def _calculate_sortino(self, pnls: list[float], risk_free_rate: float) -> float:
-        """Calculate Sortino ratio (uses downside deviation)."""
+    def _calculate_sortino(
+        self, pnls: list[float], risk_free_rate: float, trades_per_year: float = 252.0
+    ) -> float:
+        """Calculate Sortino ratio (uses downside deviation).
+
+        Args:
+            pnls: Per-trade PnL values
+            risk_free_rate: Annual risk-free rate
+            trades_per_year: Estimated trades per year for annualization
+        """
         if len(pnls) < 2:
             return 0.0
 
@@ -152,7 +208,11 @@ class PerformanceMetrics:
             return 0.0
 
         # Annualize
-        sortino = (avg_return - risk_free_rate / 252) / downside_std * math.sqrt(252)
+        sortino = (
+            (avg_return - risk_free_rate / trades_per_year)
+            / downside_std
+            * math.sqrt(trades_per_year)
+        )
         return sortino
 
     def to_dict(self) -> dict:

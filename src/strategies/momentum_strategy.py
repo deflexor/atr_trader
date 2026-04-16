@@ -24,30 +24,89 @@ from ..core.models.market_data import MarketData
 
 # Preset profiles keyed by quote-agnostic base (e.g. "BTC", "ETH", "DOGE", "TRX")
 # Values override MomentumConfig defaults for that asset class.
+#
+# Design: relaxed from previous over-filtered profiles that produced zero trades.
+# Key changes vs v1:
+#   - min_agreement 4→3 (3/5 indicators sufficient, avoids rare unanimous agreement)
+#   - pullback_enabled OFF (was blocking most entries waiting for dip)
+#   - rsi_divergence_enabled OFF (was skipping valid momentum entries)
+#   - entry_candle_required OFF (was rejecting valid signals on doji candles)
+#   - mtf_enabled OFF by default (1h confirmation was another strict gate)
 ASSET_PROFILES: dict[str, dict] = {
     "BTC": {
         "atr_filter_min_pct": 0.0015,
         "min_agreement": 3,
-        "momentum_threshold": 0.003,
-        "pullback_retrace_min": 0.002,
+        "momentum_threshold": 0.005,
+        "pullback_enabled": False,
+        "rsi_divergence_enabled": False,
+        "entry_candle_required": False,
+        "mtf_enabled": False,
     },
     "ETH": {
         "atr_filter_min_pct": 0.002,
         "min_agreement": 3,
-        "momentum_threshold": 0.004,
-        "pullback_retrace_min": 0.003,
+        "momentum_threshold": 0.005,
+        "pullback_enabled": False,
+        "rsi_divergence_enabled": False,
+        "entry_candle_required": False,
+        "mtf_enabled": False,
     },
     "DOGE": {
         "atr_filter_min_pct": 0.003,
-        "min_agreement": 2,
+        "min_agreement": 3,
         "momentum_threshold": 0.005,
-        "pullback_retrace_min": 0.004,
+        "pullback_enabled": False,
+        "rsi_divergence_enabled": False,
+        "entry_candle_required": False,
+        "mtf_enabled": False,
     },
     "TRX": {
         "atr_filter_min_pct": 0.002,
+        "min_agreement": 3,
+        "momentum_threshold": 0.005,
+        "pullback_enabled": False,
+        "rsi_divergence_enabled": False,
+        "entry_candle_required": False,
+        "mtf_enabled": False,
+    },
+    # Dual-regime profiles: aggressive (trend-following) and conservative (mean-reversion bias)
+    "BTC_AGGRESSIVE": {
+        "atr_filter_min_pct": 0.001,
         "min_agreement": 2,
-        "momentum_threshold": 0.004,
-        "pullback_retrace_min": 0.003,
+        "momentum_threshold": 0.003,
+        "pullback_enabled": False,
+        "rsi_divergence_enabled": False,
+        "entry_candle_required": False,
+        "mtf_enabled": False,
+    },
+    "BTC_CONSERVATIVE": {
+        "atr_filter_min_pct": 0.002,
+        "min_agreement": 4,
+        "momentum_threshold": 0.008,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.004,
+        "rsi_divergence_enabled": True,
+        "entry_candle_required": True,
+        "mtf_enabled": True,
+    },
+    "ETH_AGGRESSIVE": {
+        "atr_filter_min_pct": 0.0015,
+        "min_agreement": 2,
+        "momentum_threshold": 0.003,
+        "pullback_enabled": False,
+        "rsi_divergence_enabled": False,
+        "entry_candle_required": False,
+        "mtf_enabled": False,
+    },
+    "ETH_CONSERVATIVE": {
+        "atr_filter_min_pct": 0.0025,
+        "min_agreement": 4,
+        "momentum_threshold": 0.008,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.005,
+        "rsi_divergence_enabled": True,
+        "entry_candle_required": True,
+        "mtf_enabled": True,
     },
 }
 
@@ -81,10 +140,14 @@ class MomentumConfig(StrategyConfig):
         False  # Skip when RSI diverges from price (disabled: too restrictive)
     )
     rsi_divergence_lookback: int = 5  # Candles to check for divergence
-    entry_candle_required: bool = True  # Require bullish/bearish entry candle
+    entry_candle_required: bool = (
+        False  # Require bullish/bearish entry candle (OFF: too restrictive)
+    )
 
     # Multi-timeframe confirmation
-    mtf_enabled: bool = True  # Filter entries against higher-timeframe trend
+    mtf_enabled: bool = (
+        False  # Filter entries against higher-timeframe trend (OFF: too restrictive)
+    )
     mtf_timeframe: str = "1h"  # Higher timeframe to use
     mtf_ema_fast: int = 3  # Fast EMA on higher timeframe (responsive)
     mtf_ema_slow: int = 8  # Slow EMA on higher timeframe (responsive)
@@ -110,6 +173,18 @@ class MomentumStrategy(BaseStrategy):
         self._mtf_resampled: list[list[float]] = []  # [[o, h, l, c, v], ...]
         self._mtf_symbol: str = ""
         self._mtf_exchange: str = ""
+        # Diagnostics: count signals at each filter stage
+        self.diagnostics: dict[str, int] = {
+            "total_evaluated": 0,
+            "atr_filtered": 0,
+            "indicators_computed": 0,
+            "min_agreement_passed": 0,
+            "mtf_filtered": 0,
+            "pullback_filtered": 0,
+            "rsi_divergence_filtered": 0,
+            "entry_candle_filtered": 0,
+            "signals_produced": 0,
+        }
 
     def _config_for_symbol(self, symbol: str) -> MomentumConfig:
         """Return MomentumConfig with asset-specific overrides applied."""
@@ -429,12 +504,16 @@ class MomentumStrategy(BaseStrategy):
                 strategy_id=self.config.name,
             )
 
+        # Track diagnostics
+        self.diagnostics["total_evaluated"] += 1
+
         # Resolve per-asset config
         cfg = self._config_for_symbol(symbol)
 
         # --- Volatility filter: skip choppy markets ---
         if cfg.atr_filter_enabled:
             if not self._check_volatility_filter(candles, cfg.atr_filter_min_pct):
+                self.diagnostics["atr_filtered"] += 1
                 return Signal(
                     symbol=symbol,
                     exchange=candles.exchange or "kucoin",
@@ -516,6 +595,11 @@ class MomentumStrategy(BaseStrategy):
             strength = min(1.0, bear_votes / max(total_indicators, 1))
             confidence = bear_votes / max(total_indicators, 1)
 
+        self.diagnostics["indicators_computed"] += 1
+
+        if direction != SignalDirection.NEUTRAL:
+            self.diagnostics["min_agreement_passed"] += 1
+
         # --- Pullback / patience filters ---
         if direction != SignalDirection.NEUTRAL:
             # 0. Multi-timeframe: 1h trend must confirm direction
@@ -526,6 +610,7 @@ class MomentumStrategy(BaseStrategy):
                     direction = SignalDirection.NEUTRAL
                     strength = 0.0
                     confidence = 0.0
+                    self.diagnostics["mtf_filtered"] += 1
 
             # 1. Pullback: wait for price to dip toward fast EMA
             if cfg.pullback_enabled and ema_fast is not None:
@@ -535,6 +620,7 @@ class MomentumStrategy(BaseStrategy):
                     direction = SignalDirection.NEUTRAL
                     strength = 0.0
                     confidence = 0.0
+                    self.diagnostics["pullback_filtered"] += 1
 
             # 2. RSI divergence: skip if momentum weakening
             if (
@@ -546,6 +632,7 @@ class MomentumStrategy(BaseStrategy):
                     direction = SignalDirection.NEUTRAL
                     strength = 0.0
                     confidence = 0.0
+                    self.diagnostics["rsi_divergence_filtered"] += 1
 
             # 3. Entry candle: must match trade direction
             if direction != SignalDirection.NEUTRAL and cfg.entry_candle_required:
@@ -553,6 +640,7 @@ class MomentumStrategy(BaseStrategy):
                     direction = SignalDirection.NEUTRAL
                     strength = 0.0
                     confidence = 0.0
+                    self.diagnostics["entry_candle_filtered"] += 1
 
         current_price = closes[-1] if closes else 0.0
 
@@ -571,6 +659,7 @@ class MomentumStrategy(BaseStrategy):
             entry_level = self._previous_candle_level(candles, is_long)
             if entry_level is not None:
                 signal.features = {"entry_level": entry_level}
+            self.diagnostics["signals_produced"] += 1
 
         return signal
 

@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from .features import FeatureEngine, FeatureConfig
-from .model import SignalPredictor, ModelConfig, EnsemblePredictor
+from .model import SignalClassifier, ModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class TrainingPipeline:
     def __init__(self, config: Optional[TrainingConfig] = None):
         self.config = config or TrainingConfig()
         self.feature_engine = FeatureEngine(self.config.feature_config)
-        self.model: Optional[SignalPredictor] = None
+        self.model: Optional[SignalClassifier] = None
         self.history: Optional[dict] = None
 
         # Set random seed
@@ -170,7 +170,7 @@ class TrainingPipeline:
 
         """
         if self.model is None:
-            self.model = SignalPredictor(self.config.model_config)
+            self.model = SignalClassifier(self.config.model_config)
 
         self.history = self.model.train_model(
             train_features,
@@ -233,7 +233,7 @@ class TrainingPipeline:
     def load_model(self, path: str) -> None:
         """Load trained model."""
         if self.model is None:
-            self.model = SignalPredictor(self.config.model_config)
+            self.model = SignalClassifier(self.config.model_config)
         self.model.load(path)
         logger.info(f"Model loaded from {path}")
 

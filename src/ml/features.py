@@ -43,16 +43,19 @@ class FeatureEngine:
 
     @property
     def num_features(self) -> int:
-        """Calculate total number of features based on default config (without market_data).
+        """Calculate total number of features based on config.
 
-        This is used for model configuration when market_data is not provided.
+        Includes ALL configured feature groups, including market_depth,
+        since create_features() may add them when market_data is provided.
+        The model must be sized for the maximum possible feature count.
         """
         num = 3  # Returns, normalized price, HL range
         if self.config.include_technical:
             num += 4  # RSI, MACD, BB, MA diff
         if self.config.include_volume:
             num += 3  # Volume norm, momentum, VWAP
-        # Market depth features only when market_data is provided
+        if self.config.include_market_depth:
+            num += 4  # Spread, spread%, bid/ask ratio, momentum
         return num
 
     def create_features(
@@ -89,6 +92,9 @@ class FeatureEngine:
         # Market depth features (if available)
         if self.config.include_market_depth and market_data:
             features.extend(self._market_depth_features(market_data))
+        elif self.config.include_market_depth:
+            # Pad with zeros when market_data not provided — keeps shape consistent
+            features.extend([[0] * self.config.window_size for _ in range(4)])
 
         # Transpose to [window_size, num_features]
         return np.array(features).T
@@ -239,16 +245,9 @@ class FeatureEngine:
         return features
 
     @property
-    def _num_features(self) -> int:
-        """Calculate total number of features."""
-        num = 3  # Returns, normalized price, HL range
-        if self.config.include_technical:
-            num += 4  # RSI, MACD, BB, MA diff
-        if self.config.include_volume:
-            num += 3  # Volume norm, momentum, VWAP
-        if self.config.include_market_depth:
-            num += 4  # Spread, spread%, bid/ask ratio, momentum
-        return num
+    def _num_features_compat(self) -> int:
+        """Legacy alias — use num_features instead."""
+        return self.num_features
 
     def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> np.ndarray:
         """Calculate RSI indicator."""

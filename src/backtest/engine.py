@@ -34,9 +34,9 @@ class BacktestConfig:
     take_profit_pct: float = 0.04  # 4% take profit (fallback, 2:1 R:R)
     use_atr_stops: bool = True  # Use ATR-based dynamic stops
     atr_period: int = 14
-    atr_sl_multiplier: float = 3.0  # SL = 3x ATR (wide to avoid noise)
-    atr_tp_multiplier: float = 6.0  # TP = 6x ATR (2:1 R:R, let winners run)
-    cooldown_candles: int = 12  # Wait 12 candles (1hr on 5m) between trades
+    atr_sl_multiplier: float = 3.0  # SL = 3x ATR (wide enough to avoid noise)
+    atr_tp_multiplier: float = 4.0  # TP = 4x ATR (1.33:1 R:R, reachable vs old 6x)
+    cooldown_candles: int = 4  # Wait 4 candles (20min on 5m) between trades
     use_trailing_stop: bool = True  # Enable trailing stops after activation
     trailing_activation_atr: float = 0.5  # Activate after 0.5x ATR profit
     trailing_distance_atr: float = 0.75  # Trail at 0.75x ATR behind extreme

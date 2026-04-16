@@ -1,6 +1,15 @@
-"""Neural network model for signal strength prediction.
+"""Neural network model for signal direction classification.
 
-Predicts signal strength based on engineered features.
+Architecture:
+- Input: [batch, window_size, num_features]
+- LSTM layers for temporal pattern recognition
+- Classification head with 3 outputs: DOWN(0), FLAT(1), UP(2)
+- Output: class probabilities via softmax
+
+Label definition:
+- UP (2): future price rises by > threshold_pct over horizon steps
+- DOWN (0): future price falls by > threshold_pct over horizon steps
+- FLAT (1): everything else (no clear directional move)
 """
 
 from __future__ import annotations
@@ -18,55 +27,62 @@ from .features import FeatureEngine, FeatureConfig
 logger = logging.getLogger(__name__)
 
 
+# Class indices
+CLASS_DOWN = 0
+CLASS_FLAT = 1
+CLASS_UP = 2
+
+
 @dataclass
 class ModelConfig:
     """Neural network configuration."""
 
-    num_features: int = 13  # features per timestep (price, volume, indicators, etc.)
+    num_features: int = 13  # features per timestep
     hidden_dims: list[int] = field(default_factory=lambda: [128, 64, 32])
-    output_size: int = 1  # Signal strength prediction
-    dropout: float = 0.2
+    num_classes: int = 3  # DOWN, FLAT, UP
+    dropout: float = 0.3  # higher dropout for classification
     learning_rate: float = 0.001
     batch_size: int = 256
-    epochs: int = 100
+    epochs: int = 50
+    # Classification threshold: price must move > this fraction to count as UP/DOWN
+    threshold_pct: float = 0.005
 
 
-class SignalPredictor(nn.Module):
-    """Neural network for signal strength prediction.
+class SignalClassifier(nn.Module):
+    """3-class LSTM classifier: DOWN / FLAT / UP.
 
-    Architecture:
-    - Input: [batch, window_size, num_features]
-    - LSTM layers for temporal pattern recognition
-    - Fully connected layers for signal strength output
-    - Output: [batch, 1] (signal strength 0-1)
+    Uses softmax output and CrossEntropyLoss for proper classification.
     """
 
     def __init__(self, config: Optional[ModelConfig] = None):
         super().__init__()
         self.config = config or ModelConfig()
 
-        # Determine number of features from config or use default
-        # input_size in config represents features per timestep (not window size)
         self.num_features = getattr(self.config, "num_features", 13) or 13
 
-        # LSTM layer for temporal patterns
+        # Bidirectional LSTM for better pattern recognition
         self.lstm = nn.LSTM(
             input_size=self.num_features,
             hidden_size=self.config.hidden_dims[0],
             num_layers=2,
             batch_first=True,
             dropout=self.config.dropout,
+            bidirectional=True,
         )
+
+        # Attention-like pooling: weight last N outputs
+        self.pool = nn.Linear(self.config.hidden_dims[0] * 2, 1)
 
         # Fully connected layers
         fc_layers = []
-        prev_dim = self.config.hidden_dims[0]
+        prev_dim = self.config.hidden_dims[0] * 2
 
         for hidden_dim in self.config.hidden_dims[1:]:
             fc_layers.extend(
                 [
                     nn.Linear(prev_dim, hidden_dim),
                     nn.ReLU(),
+                    nn.BatchNorm1d(hidden_dim),
                     nn.Dropout(self.config.dropout),
                 ]
             )
@@ -74,17 +90,16 @@ class SignalPredictor(nn.Module):
 
         self.fc = nn.Sequential(*fc_layers)
 
-        # Output layer
-        self.output = nn.Linear(prev_dim, self.config.output_size)
-        self.sigmoid = nn.Sigmoid()
+        # Classification head
+        self.output = nn.Linear(prev_dim, self.config.num_classes)
+        self.softmax = nn.Softmax(dim=1)
 
-        # Loss function
-        self.loss_fn = nn.MSELoss()
-
-        # Optimizer
-        self.optimizer = torch.optim.Adam(
+        # Loss and optimizer
+        self.loss_fn = nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.config.learning_rate,
+            weight_decay=1e-4,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -94,36 +109,41 @@ class SignalPredictor(nn.Module):
             x: Input tensor [batch, window_size, num_features]
 
         Returns:
-            Signal strength predictions [batch, 1]
-
+            Class probabilities [batch, 3]
         """
-        # LSTM expects [batch, seq, features]
-        lstm_out, (hidden, cell) = self.lstm(x)
+        # LSTM
+        lstm_out, _ = self.lstm(x)  # [batch, seq, hidden*2]
 
-        # Use last LSTM output
-        last_output = lstm_out[:, -1, :]
+        # Weighted pooling over sequence (attention-like)
+        weights = torch.softmax(self.pool(lstm_out), dim=1)  # [batch, seq, 1]
+        pooled = (lstm_out * weights).sum(dim=1)  # [batch, hidden*2]
 
-        # Fully connected layers
-        fc_out = self.fc(last_output)
+        # FC
+        fc_out = self.fc(pooled)
 
-        # Output with sigmoid (0-1 range)
-        return self.sigmoid(self.output(fc_out))
+        # Classification
+        logits = self.output(fc_out)
+        return self.softmax(logits)
 
-    def predict(self, features: np.ndarray) -> float:
-        """Predict signal strength from features.
+    def predict_class(self, features: np.ndarray) -> Tuple[int, float, np.ndarray]:
+        """Predict class and confidence from features.
 
         Args:
             features: Feature array [window_size, num_features]
 
         Returns:
-            Signal strength (0-1)
-
+            (class_id, confidence, all_probabilities)
+            class_id: 0=DOWN, 1=FLAT, 2=UP
+            confidence: probability of predicted class (0-1)
+            all_probabilities: [p(DOWN), p(FLAT), p(UP)]
         """
         self.eval()
         with torch.no_grad():
-            x = torch.FloatTensor(features).unsqueeze(0)  # Add batch dimension
-            prediction = self.forward(x)
-            return prediction.item()
+            x = torch.FloatTensor(features).unsqueeze(0)
+            probs = self.forward(x).squeeze(0).numpy()  # [3]
+            class_id = int(np.argmax(probs))
+            confidence = float(probs[class_id])
+            return class_id, confidence, probs
 
     def train_model(
         self,
@@ -132,76 +152,90 @@ class SignalPredictor(nn.Module):
         val_features: Optional[np.ndarray] = None,
         val_labels: Optional[np.ndarray] = None,
     ) -> dict:
-        """Train the model on features and labels.
+        """Train classifier on features and labels.
 
         Args:
             train_features: Training features [num_samples, window_size, num_features]
-            train_labels: Training labels [num_samples]
+            train_labels: Training labels [num_samples] with values 0, 1, 2
             val_features: Optional validation features
             val_labels: Optional validation labels
 
         Returns:
             Training history dict
-
         """
         self.train()
 
-        # Convert to tensors
-        X_train = torch.FloatTensor(train_features)
-        y_train = torch.FloatTensor(train_labels).unsqueeze(1)
+        X_train = torch.FloatTensor(train_features)  # features are float32
+        y_train = torch.LongTensor(train_labels)  # labels are int (0,1,2)
 
         dataset = torch.utils.data.TensorDataset(X_train, y_train)
         dataloader = torch.utils.data.DataLoader(
             dataset,
             batch_size=self.config.batch_size,
             shuffle=True,
+            drop_last=True,
         )
 
         history = {
             "train_loss": [],
+            "train_acc": [],
             "val_loss": [],
+            "val_acc": [],
         }
 
         for epoch in range(self.config.epochs):
             epoch_loss = 0.0
+            correct = 0
+            total = 0
             num_batches = 0
 
             for batch_x, batch_y in dataloader:
-                # Forward pass
-                predictions = self.forward(batch_x)
+                predictions = self.forward(batch_x)  # [batch, 3]
                 loss = self.loss_fn(predictions, batch_y)
 
-                # Backward pass
                 self.optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
                 self.optimizer.step()
 
                 epoch_loss += loss.item()
+                preds_class = torch.argmax(predictions, dim=1)
+                correct += (preds_class == batch_y).sum().item()
+                total += batch_y.size(0)
                 num_batches += 1
 
             avg_loss = epoch_loss / num_batches
+            acc = correct / total if total > 0 else 0
             history["train_loss"].append(avg_loss)
+            history["train_acc"].append(acc)
 
-            # Validation
             if val_features is not None and val_labels is not None:
-                val_loss = self._evaluate(val_features, val_labels)
+                val_loss, val_acc = self._evaluate(val_features, val_labels)
                 history["val_loss"].append(val_loss)
+                history["val_acc"].append(val_acc)
                 logger.info(
-                    f"Epoch {epoch + 1}/{self.config.epochs}, train_loss={avg_loss:.4f}, val_loss={val_loss:.4f}"
+                    f"Epoch {epoch + 1}/{self.config.epochs}, "
+                    f"loss={avg_loss:.4f}, acc={acc:.3f}, "
+                    f"val_loss={val_loss:.4f}, val_acc={val_acc:.3f}"
                 )
             else:
-                logger.info(f"Epoch {epoch + 1}/{self.config.epochs}, loss={avg_loss:.4f}")
+                logger.info(
+                    f"Epoch {epoch + 1}/{self.config.epochs}, loss={avg_loss:.4f}, acc={acc:.3f}"
+                )
 
         return history
 
-    def _evaluate(self, features: np.ndarray, labels: np.ndarray) -> float:
+    def _evaluate(self, features: np.ndarray, labels: np.ndarray) -> Tuple[float, float]:
         """Evaluate model on validation set."""
         self.eval()
         with torch.no_grad():
-            X = torch.FloatTensor(features)
-            y = torch.FloatTensor(labels).unsqueeze(1)
+            X = torch.FloatTensor(features)  # features are float32
+            y = torch.LongTensor(labels)  # labels are int (0,1,2)
             predictions = self.forward(X)
-            return self.loss_fn(predictions, y).item()
+            loss = self.loss_fn(predictions, y).item()
+            preds_class = torch.argmax(predictions, dim=1)
+            acc = (preds_class == y).float().mean().item()
+        return loss, acc
 
     def save(self, path: str) -> None:
         """Save model to disk."""
@@ -223,34 +257,52 @@ class SignalPredictor(nn.Module):
         logger.info(f"Model loaded from {path}")
 
 
-class EnsemblePredictor:
-    """Ensemble of multiple SignalPredictor models for improved accuracy."""
+def create_classification_labels(
+    candles_prices: np.ndarray,
+    horizon: int,
+    threshold_pct: float = 0.005,
+) -> np.ndarray:
+    """Create classification labels from price series.
 
-    def __init__(self, models: list[SignalPredictor], weights: Optional[list[float]] = None):
-        self.models = models
-        self.weights = weights or [1.0 / len(models)] * len(models)
+    Labels:
+        2 (UP): price rises by > threshold_pct over horizon
+        0 (DOWN): price falls by > threshold_pct over horizon
+        1 (FLAT): everything else
 
-    def predict(self, features: np.ndarray) -> float:
-        """Ensemble prediction (weighted average)."""
-        predictions = []
-        for model in self.models:
-            pred = model.predict(features)
-            predictions.append(pred)
+    Args:
+        candles_prices: Array of close prices
+        horizon: Number of steps ahead for prediction
+        threshold_pct: Fraction that defines a significant move
 
-        # Weighted average
-        return sum(p * w for p, w in zip(predictions, self.weights))
+    Returns:
+        Array of integer labels [num_windows]
+    """
+    window = 60  # Must match FeatureConfig.window_size
+    labels = []
 
-    def train_ensemble(
-        self,
-        train_features: np.ndarray,
-        train_labels: np.ndarray,
-        val_features: Optional[np.ndarray] = None,
-        val_labels: Optional[np.ndarray] = None,
-    ) -> list[dict]:
-        """Train all models in ensemble."""
-        histories = []
-        for i, model in enumerate(self.models):
-            logger.info(f"Training model {i + 1}/{len(self.models)}")
-            history = model.train_model(train_features, train_labels, val_features, val_labels)
-            histories.append(history)
-        return histories
+    for i in range(window, len(candles_prices) - horizon):
+        current = candles_prices[i]
+        future = candles_prices[i + horizon]
+        change_pct = (future - current) / current
+
+        if change_pct > threshold_pct:
+            labels.append(CLASS_UP)
+        elif change_pct < -threshold_pct:
+            labels.append(CLASS_DOWN)
+        else:
+            labels.append(CLASS_FLAT)
+
+    return np.array(labels)
+
+
+def class_to_direction(class_id: int) -> int:
+    """Map classifier output to SignalDirection.
+
+    Returns:
+        2 (LONG) for UP, 0 (SHORT) for DOWN, 1 (NEUTRAL) for FLAT
+    """
+    if class_id == CLASS_UP:
+        return 2  # LONG
+    elif class_id == CLASS_DOWN:
+        return 0  # SHORT
+    return 1  # NEUTRAL

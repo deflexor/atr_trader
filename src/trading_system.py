@@ -20,8 +20,15 @@ from .core.models.candle import Candle, CandleSeries
 from .core.models.signal import Signal, SignalDirection
 from .core.models.market_data import MarketData
 from .ml.features import FeatureEngine, FeatureConfig
-from .ml.model import SignalPredictor, ModelConfig
-from .ml.training import TrainingPipeline, TrainingConfig
+from .ml.model import (
+    SignalClassifier,
+    ModelConfig,
+    create_classification_labels,
+    class_to_direction,
+    CLASS_UP,
+    CLASS_DOWN,
+)
+from .ml.features import FeatureEngine, FeatureConfig
 from .strategies.base_strategy import BaseStrategy
 from .backtest.engine import BacktestEngine, BacktestConfig
 
@@ -41,33 +48,89 @@ class TradingSystemConfig:
 
 
 class MLEnhancedSignal:
-    """Wrapper that combines strategy signals with ML predictions."""
+    """Wrapper combining strategy signals with ML classification.
+
+    ML produces 3-class probabilities [p(DOWN), p(FLAT), p(UP)].
+
+    Design: ML is an ENHANCER, not a gate.
+    - When ML agrees with strategy → boost confidence/strength
+    - When ML says FLAT → slightly reduce confidence (don't block)
+    - When ML disagrees → reduce confidence more (don't block)
+
+    The base strategy signal is always preserved — ML only adjusts the
+    magnitude, never forces NEUTRAL. This avoids the zero-trade problem
+    where ML's FLAT class (often dominant) killed all signals.
+    """
 
     def __init__(
         self,
         base_signal: Signal,
-        ml_strength: float,
+        ml_strength: int,  # 0=DOWN, 1=FLAT, 2=UP (class_id)
         ml_confidence: float,
+        ml_class_probs: np.ndarray,  # [p(DOWN), p(FLAT), p(UP)]
     ):
         self.base_signal = base_signal
-        self.ml_strength = ml_strength
+        self.ml_strength = ml_strength  # class_id: 0=DOWN, 1=FLAT, 2=UP
         self.ml_confidence = ml_confidence
+        self.ml_class_probs = ml_class_probs
 
     @property
     def combined_strength(self) -> float:
-        """Combine strategy and ML signal strengths.
+        """Signal strength adjusted by ML agreement.
 
-        Weighted average: 60% strategy, 40% ML
+        Boost when ML agrees, penalize when ML is neutral/disagrees.
         """
-        return (self.base_signal.strength * 0.6) + (self.ml_strength * 0.4)
+        base = self.base_signal.strength
+        ml_multiplier = self._ml_agreement_multiplier()
+        return min(1.0, base * ml_multiplier)
+
+    @property
+    def combined_confidence(self) -> float:
+        """Confidence adjusted by ML agreement."""
+        base = self.base_signal.confidence
+        ml_multiplier = self._ml_agreement_multiplier()
+        return min(1.0, base * ml_multiplier)
 
     @property
     def is_actionable(self) -> bool:
-        """Signal is actionable if combined strength meets threshold."""
-        # When model is not trained (ml_confidence < 0.4), rely on base_signal
-        if self.ml_confidence < 0.4:
-            return self.base_signal.is_actionable
-        return self.combined_strength >= 0.5 and self.ml_confidence >= 0.4
+        """Signal is always actionable if the base strategy produced a signal.
+
+        ML is an enhancer, not a gate. We never return False just because
+        ML disagrees — that was causing zero trades. Instead, ML adjusts
+        the strength/confidence, and the execution layer uses those to
+        decide position sizing.
+        """
+        return self.base_signal.direction != SignalDirection.NEUTRAL
+
+    def _ml_agreement_multiplier(self) -> float:
+        """Calculate multiplier based on ML agreement with base signal.
+
+        Returns:
+            1.3  — ML strongly agrees (same direction, high prob)
+            1.0  — ML says FLAT (no boost, no penalty)
+            0.7  — ML disagrees (different direction)
+        """
+        base_dir = self.base_signal.direction  # SignalDirection enum
+        ml_class = self.ml_strength
+        ml_prob = self.ml_class_probs[ml_class] if self.ml_class_probs is not None else 0.33
+
+        # Base strategy is neutral — no adjustment
+        if base_dir == SignalDirection.NEUTRAL:
+            return 1.0
+
+        # Check direction agreement: LONG+UP or SHORT+DOWN
+        agrees = (base_dir == SignalDirection.LONG and ml_class == 2) or (
+            base_dir == SignalDirection.SHORT and ml_class == 0
+        )
+
+        if agrees and ml_prob > 0.5:
+            return 1.3  # Strong agreement
+        elif agrees:
+            return 1.1  # Weak agreement
+        elif ml_class == 1:
+            return 1.0  # ML says FLAT — neutral, don't penalize
+        else:
+            return 0.7  # ML disagrees — reduce but don't kill
 
 
 class TradingSystem:
@@ -164,7 +227,7 @@ class TradingSystem:
         return series
 
     def train_model(self, candles: CandleSeries) -> dict:
-        """Train the ML model on historical candle data.
+        """Train the ML classifier on historical candle data.
 
         Args:
             candles: Historical candle data
@@ -172,67 +235,84 @@ class TradingSystem:
         Returns:
             Training metrics and history
         """
-        logger.info("Training ML model on historical data...")
+        logger.info("Training ML classifier on historical data...")
 
-        # Prepare training data from candles
-        train_features, train_labels = self._prepare_training_data(candles)
+        train_features, train_labels = self._prepare_classification_data(candles)
 
-        # Initialize training pipeline
-        # Get actual number of features from feature engine
+        if len(train_features) == 0:
+            logger.warning("No training data available")
+            return {"history": {}, "num_samples": 0}
+
+        # Shuffle and split train/val
+        import numpy as np
+
+        indices = np.arange(len(train_features))
+        np.random.shuffle(indices)
+        split = int(len(indices) * 0.8)
+        train_idx, val_idx = indices[:split], indices[split:]
+
+        train_x = train_features[train_idx]
+        train_y = train_labels[train_idx]
+        val_x = train_features[val_idx]
+        val_y = train_labels[val_idx]
+
+        # Create classifier
         actual_num_features = self.feature_engine.num_features
-        self.training_pipeline = TrainingPipeline(
-            TrainingConfig(
-                feature_config=FeatureConfig(
-                    window_size=self.config.feature_window,
-                    horizon=self.config.prediction_horizon,
-                ),
-                model_config=ModelConfig(
-                    num_features=actual_num_features,
-                    hidden_dims=[128, 64, 32],
-                    output_size=1,
-                    learning_rate=0.001,
-                    batch_size=256,
-                    epochs=10,  # Reduced for faster iteration
-                ),
-            )
+        model_cfg = ModelConfig(
+            num_features=actual_num_features,
+            hidden_dims=[128, 64, 32],
+            num_classes=3,
+            dropout=0.3,
+            learning_rate=0.001,
+            batch_size=256,
+            epochs=20,
+            threshold_pct=0.005,
         )
 
-        # Train model
-        self.model = SignalPredictor(self.training_pipeline.config.model_config)
-        history = self.model.train_model(train_features, train_labels)
+        self.model = SignalClassifier(model_cfg)
+        history = self.model.train_model(train_x, train_y, val_x, val_y)
+
+        # Class distribution
+        class_counts = np.bincount(train_labels, minlength=3)
+        logger.info(
+            f"Training class distribution: DOWN={class_counts[0]}, "
+            f"FLAT={class_counts[1]}, UP={class_counts[2]}"
+        )
 
         self._is_trained = True
-        logger.info("ML model training complete")
+        logger.info("ML classifier training complete")
 
         return {
             "history": history,
             "num_samples": len(train_features),
+            "class_counts": class_counts.tolist(),
         }
 
-    def _prepare_training_data(
-        self,
-        candles: CandleSeries,
-    ) -> tuple:
-        """Convert candles to ML training format.
+    def _prepare_classification_data(self, candles: CandleSeries) -> tuple:
+        """Convert candles to classification training format.
 
-        Args:
-            candles: Historical candles
+        Labels: 0=DOWN, 1=FLAT, 2=UP based on future price movement.
 
         Returns:
             (features, labels) tuple for training
         """
-        features = []
-        labels = []
+        import numpy as np
 
         window = self.config.feature_window
         horizon = self.config.prediction_horizon
 
-        for i in range(window, len(candles.candles) - horizon):
-            # Create window of candles for feature generation
-            window_candles = candles.candles[i - window : i]
-            future_candle = candles.candles[i + horizon]
+        # Collect all close prices
+        closes = np.array([c.close for c in candles.candles])
 
-            # Create features
+        # Generate classification labels
+        raw_labels = create_classification_labels(closes, horizon=horizon, threshold_pct=0.005)
+
+        features = []
+        labels = []
+
+        for i in range(window, len(candles.candles) - horizon):
+            window_candles = candles.candles[i - window : i]
+
             feature_matrix = self.feature_engine.create_features(
                 CandleSeries(
                     candles=window_candles,
@@ -242,59 +322,37 @@ class TradingSystem:
                 )
             )
 
-            # Calculate label (future return normalized)
-            current_price = window_candles[-1].close
-            future_price = future_candle.close
-            label = (future_price - current_price) / current_price
+            label_idx = i - window
+            if label_idx < len(raw_labels):
+                features.append(feature_matrix)
+                labels.append(raw_labels[label_idx])
 
-            features.append(feature_matrix)
-            labels.append(label)
-
-        # Normalize labels to 0-1 range
-        import numpy as np
-
-        labels = np.array(labels)
-        labels_min, labels_max = labels.min(), labels.max()
-        if labels_max - labels_min > 0:
-            labels = (labels - labels_min) / (labels_max - labels_min)
-        else:
-            labels = np.ones_like(labels) * 0.5
-
-        return np.array(features), labels
+        return np.array(features), np.array(labels)
 
     def predict_signal_strength(
         self,
         candles: CandleSeries,
         symbol: str,
-    ) -> tuple[float, float]:
-        """Predict signal strength using trained ML model.
+    ) -> tuple[int, float, np.ndarray]:
+        """Predict signal direction using trained ML classifier.
 
         Args:
             candles: Recent candle history (must have at least window_size candles)
             symbol: Trading pair symbol
 
         Returns:
-            (predicted_strength, confidence) tuple
-
+            (class_id, confidence, all_probabilities)
+            class_id: 0=DOWN, 1=FLAT, 2=UP
+            confidence: probability of predicted class
+            all_probabilities: [p(DOWN), p(FLAT), p(UP)]
         """
         if not self._is_trained or self.model is None:
-            return 0.5, 0.3  # Neutral prediction if not trained
+            return 1, 0.3, np.array([0.33, 0.34, 0.33])
 
-        # Create features from recent candles
-        feature_matrix = self.feature_engine.create_features(candles)
-
-        # Get prediction
-        self.model.eval()
-        import torch
-
-        with torch.no_grad():
-            features = torch.FloatTensor(feature_matrix).unsqueeze(0)
-            prediction = self.model(features).item()
-
-        # Confidence is based on prediction distance from 0.5
-        confidence = 1.0 - abs(prediction - 0.5) * 2
-
-        return prediction, confidence
+        class_id, confidence, probs = self.model.predict_class(
+            self.feature_engine.create_features(candles)
+        )
+        return class_id, confidence, probs
 
     async def generate_ml_enhanced_signal(
         self,
@@ -317,15 +375,17 @@ class TradingSystem:
 
         # Get ML prediction if model is trained
         if self._is_trained and self.model:
-            ml_strength, ml_confidence = self.predict_signal_strength(candles, symbol)
+            class_id, ml_confidence, probs = self.predict_signal_strength(candles, symbol)
         else:
-            ml_strength = 0.5
+            class_id = 1
             ml_confidence = 0.3
+            probs = np.array([0.33, 0.34, 0.33])
 
         return MLEnhancedSignal(
             base_signal=base_signal,
-            ml_strength=ml_strength,
+            ml_strength=class_id,  # 0=DOWN, 1=FLAT, 2=UP
             ml_confidence=ml_confidence,
+            ml_class_probs=probs,  # [p(DOWN), p(FLAT), p(UP)]
         )
 
     def create_backtest_engine(
@@ -362,16 +422,30 @@ class TradingSystem:
 
         backtest_engine = self.create_backtest_engine()
 
-        # Create signal generator that uses ML
+        # Create signal generator that uses ML classification as enhancer
         async def ml_signal_generator(sym: str, c: CandleSeries) -> Signal:
             ml_signal = await self.generate_ml_enhanced_signal(sym, strategy, c)
             signal = ml_signal.base_signal
-            # Enhance signal with ML prediction
+
+            # If base strategy says NEUTRAL, nothing to enhance
+            if signal.direction == SignalDirection.NEUTRAL:
+                return signal
+
+            # ML is an enhancer — adjust strength/confidence but never force NEUTRAL
             signal.strength = ml_signal.combined_strength
-            # Preserve base_signal confidence if ML is not confident
-            if ml_signal.ml_confidence >= 0.4:
-                signal.confidence = ml_signal.ml_confidence
-            signal.predicted_outcome = ml_signal.ml_strength
+            signal.confidence = ml_signal.combined_confidence
+
+            # When ML strongly agrees and base is neutral, let ML drive direction
+            # (This handles the case where strategy didn't fire but ML sees a move)
+            if signal.direction == SignalDirection.NEUTRAL and ml_signal.ml_strength != 1:
+                if ml_signal.ml_strength == 2:  # UP
+                    signal.direction = SignalDirection.LONG
+                elif ml_signal.ml_strength == 0:  # DOWN
+                    signal.direction = SignalDirection.SHORT
+                signal.strength = (
+                    ml_signal.combined_strength * 0.7
+                )  # Reduced confidence for ML-only
+
             return signal
 
         # Run backtest

@@ -27,16 +27,13 @@ from ..core.models.market_data import MarketData
 #
 # Design: relaxed from previous over-filtered profiles that produced zero trades.
 # Key changes vs v1:
-#   - min_agreement 4→3 (3/5 indicators sufficient, avoids rare unanimous agreement)
-#   - pullback_enabled OFF (was blocking most entries waiting for dip)
-#   - rsi_divergence_enabled OFF (was skipping valid momentum entries)
-#   - entry_candle_required OFF (was rejecting valid signals on doji candles)
-#   - mtf_enabled OFF by default (1h confirmation was another strict gate)
+#   - min_agreement lowered to 2 for more frequent entries (was 3)
+#   - pullback_enabled ON (0.5% retrace — best performing)
 ASSET_PROFILES: dict[str, dict] = {
-    # Default profiles: pullback enabled (0.1% retrace), no other restrictive filters
+    # Default profiles: min_agreement=2 for more frequent entries, pullback enabled
     "BTC": {
         "atr_filter_min_pct": 0.001,
-        "min_agreement": 3,
+        "min_agreement": 2,
         "momentum_threshold": 0.005,
         "pullback_enabled": True,
         "pullback_retrace_min": 0.005,  # 0.5% pullback — best performing
@@ -46,7 +43,7 @@ ASSET_PROFILES: dict[str, dict] = {
     },
     "ETH": {
         "atr_filter_min_pct": 0.001,
-        "min_agreement": 3,
+        "min_agreement": 2,
         "momentum_threshold": 0.005,
         "pullback_enabled": True,
         "pullback_retrace_min": 0.005,
@@ -56,7 +53,7 @@ ASSET_PROFILES: dict[str, dict] = {
     },
     "DOGE": {
         "atr_filter_min_pct": 0.002,
-        "min_agreement": 3,
+        "min_agreement": 2,
         "momentum_threshold": 0.005,
         "pullback_enabled": True,
         "pullback_retrace_min": 0.006,  # slightly more for volatile assets
@@ -66,7 +63,7 @@ ASSET_PROFILES: dict[str, dict] = {
     },
     "TRX": {
         "atr_filter_min_pct": 0.001,
-        "min_agreement": 3,
+        "min_agreement": 2,
         "momentum_threshold": 0.005,
         "pullback_enabled": True,
         "pullback_retrace_min": 0.005,
@@ -136,7 +133,7 @@ class MomentumConfig(StrategyConfig):
     macd_slow: int = 26
     macd_signal: int = 9
     momentum_threshold: float = 0.005  # 0.5% move to confirm momentum
-    min_agreement: int = 3  # Minimum indicators that must agree (of 5)
+    min_agreement: int = 2  # Minimum indicators that must agree (of 5)
 
     # Pullback / patience settings
     pullback_enabled: bool = True  # Wait for pullback within trend
@@ -305,6 +302,22 @@ class MomentumStrategy(BaseStrategy):
         if total == 0:
             return 0.0
         return (up_volume - down_volume) / total
+
+    def _check_volume_spike(self, candles: CandleSeries, mult: float = 2.0) -> bool:
+        """Check if current volume is significantly above average.
+
+        Used to filter entries during low-volume choppy markets.
+        Returns True if volume spike detected (don't block).
+        """
+        lookback = 20
+        if len(candles.candles) < lookback + 1:
+            return True  # Not enough data, don't block
+
+        recent_volumes = [c.volume for c in candles.candles[-lookback:]]
+        avg_volume = sum(recent_volumes) / len(recent_volumes)
+        current_volume = candles.candles[-1].volume
+
+        return current_volume >= avg_volume * mult
 
     def _check_pullback(
         self,
@@ -670,12 +683,18 @@ class MomentumStrategy(BaseStrategy):
 
         self.diagnostics["indicators_computed"] += 1
 
+        # --- Volume & patience filters ---
         if direction != SignalDirection.NEUTRAL:
             self.diagnostics["min_agreement_passed"] += 1
 
-        # --- Pullback / patience filters ---
-        if direction != SignalDirection.NEUTRAL:
-            # 0. Multi-timeframe: 1h trend must confirm direction
+            # 0. Volume spike: reject entries in low-volume chop
+            if not self._check_volume_spike(candles, mult=2.0):
+                direction = SignalDirection.NEUTRAL
+                strength = 0.0
+                confidence = 0.0
+                self.diagnostics["volume_filtered"] = self.diagnostics.get("volume_filtered", 0) + 1
+
+            # 1. Multi-timeframe: 1h trend must confirm direction
             if cfg.mtf_enabled:
                 if not self._check_mtf_trend(
                     candles, is_long, cfg.mtf_timeframe, cfg.mtf_ema_fast, cfg.mtf_ema_slow

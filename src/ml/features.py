@@ -53,7 +53,7 @@ class FeatureEngine:
         if self.config.include_technical:
             num += 4  # RSI, MACD, BB, MA diff
         if self.config.include_volume:
-            num += 3  # Volume norm, momentum, VWAP
+            num += 4  # Volume norm, momentum, VWAP, imbalance
         if self.config.include_market_depth:
             num += 4  # Spread, spread%, bid/ask ratio, momentum
         return num
@@ -218,6 +218,21 @@ class FeatureEngine:
         else:
             features.append([0] * self.config.window_size)
 
+        # Buy/sell pressure imbalance (like _volume_trend in momentum strategy)
+        if len(candles.candles) >= self.config.window_size:
+            lookback = min(20, len(candles.candles))
+            recent = candles.candles[-lookback:]
+            up_vol = sum(c.volume for c in recent if c.close > c.open)
+            down_vol = sum(c.volume for c in recent if c.close <= c.open)
+            total = up_vol + down_vol
+            if total > 0:
+                vol_imbalance = [(up_vol - down_vol) / total] * self.config.window_size
+            else:
+                vol_imbalance = [0] * self.config.window_size
+        else:
+            vol_imbalance = [0] * self.config.window_size
+        features.append(vol_imbalance)
+
         return features
 
     def _market_depth_features(self, market_data: MarketData) -> list[float]:
@@ -355,7 +370,7 @@ class FeatureEngine:
         if self.config.include_technical:
             names.extend(["rsi", "macd_hist", "bb_position", "ma_diff"])
         if self.config.include_volume:
-            names.extend(["vol_normalized", "vol_momentum", "vwap_dev"])
+            names.extend(["vol_normalized", "vol_momentum", "vwap_dev", "vol_imbalance"])
         if self.config.include_market_depth:
             names.extend(["spread", "spread_pct", "bid_ask_ratio", "mid_momentum"])
 

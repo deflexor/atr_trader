@@ -38,6 +38,7 @@ class Signal:
     timestamp: datetime = field(default_factory=datetime.utcnow)
     features: Optional[dict] = None  # raw features for training
     predicted_outcome: Optional[float] = None  # neural net predicted return
+    ml_max_prob: float = 0.0  # LSTM max class probability (0-1), for confidence gating
 
     @property
     def is_actionable(self) -> bool:
@@ -72,4 +73,5 @@ class Signal:
             "strategy_id": self.strategy_id,
             "timestamp": self.timestamp.isoformat(),
             "predicted_outcome": self.predicted_outcome,
+            "ml_max_prob": self.ml_max_prob,
         }

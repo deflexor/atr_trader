@@ -42,6 +42,7 @@ class BacktestConfig:
     use_trailing_stop: bool = True  # Enable trailing stops after activation
     trailing_activation_atr: float = 3.0  # Activate after 3x ATR profit (let trend develop)
     trailing_distance_atr: float = 3.0  # Trail at 3x ATR behind extreme (room to breathe)
+    max_drawdown_pct: float = 0.0  # Halt new entries when drawdown exceeds this (0 = disabled)
 
 
 @dataclass
@@ -109,6 +110,8 @@ class BacktestEngine:
         self.metrics.reset()
         self._consecutive_losses = 0
         self._current_risk_multiplier = 1.0
+        self._drawdown_halted = False
+        self._peak_equity = self.config.initial_capital
 
     def _calculate_atr(self, candles: CandleSeries, period: int = 14) -> Optional[float]:
         """Calculate Average True Range for dynamic stop sizing."""
@@ -177,13 +180,25 @@ class BacktestEngine:
             # Process signal: open new position if cooldown passed
             if signal.is_actionable and signal.direction != SignalDirection.NEUTRAL:
                 in_cooldown = (i - self._last_trade_candle) < self.config.cooldown_candles
-                if not in_cooldown:
+                halted_by_drawdown = self._drawdown_halted
+                if not in_cooldown and not halted_by_drawdown:
                     self._process_signal(signal, candle, visible_candles)
                     if self.positions and self.positions[-1].strategy_id:
                         self._last_trade_candle = i
 
             # Record equity
             equity = self._calculate_equity(candle.close)
+            self._peak_equity = max(self._peak_equity, equity)
+
+            # Check drawdown halt
+            if self.config.max_drawdown_pct > 0 and self._peak_equity > 0:
+                drawdown = (self._peak_equity - equity) / self._peak_equity
+                if drawdown >= self.config.max_drawdown_pct:
+                    self._drawdown_halted = True
+                elif equity >= self._peak_equity * (1 - self.config.max_drawdown_pct * 0.5):
+                    # Recovered halfway — resume
+                    self._drawdown_halted = False
+
             self.equity_curve.append(
                 {
                     "timestamp": timestamp,
@@ -408,9 +423,12 @@ class BacktestEngine:
         else:
             atr = None
 
-        if atr and atr > 0:
+        if atr and atr > 0 and self.config.atr_sl_multiplier < 99 and self.config.atr_tp_multiplier < 99:
             sl_distance = atr * self.config.atr_sl_multiplier
             tp_distance = atr * self.config.atr_tp_multiplier
+        elif self.config.use_trailing_stop:
+            sl_distance = 0  # Trailing stop only, no fixed SL
+            tp_distance = 0  # Trailing stop only, no fixed TP
         else:
             sl_distance = fill_price * self.config.stop_loss_pct
             tp_distance = fill_price * self.config.take_profit_pct

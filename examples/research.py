@@ -225,32 +225,21 @@ async def run_single_experiment(
         )
 
         logger.info(
-            f"Backtest complete: Return={result['total_return_pct']:.2f}%, "
-            f"Sharpe={result['sharpe_ratio']:.2f}, Trades={result['total_trades']}"
+            f"Backtest complete: Return={actual_return:.2f}%, "
+            f"Sharpe={actual_sharpe:.2f}, WinRate={actual_win_rate:.1%}, Trades={actual_trades} ({actual_winning}W/{actual_losing}L)"
         )
 
-        # Analyze per-day performance from the equity curve
-        # Get the backtest engine's equity curve to compute daily returns
-        # For now, just record the overall result
-        for day_offset in range(num_days):
-            daily_results.append(
-                {
-                    "day_offset": day_offset,
-                    "day": day_offset + 1,
-                    "return_pct": 0,  # Will be filled from equity curve analysis
-                    "sharpe": 0,
-                    "trades": 0,
-                    "win_rate": 0,
-                }
-            )
-
-        # Calculate overall results
-        if not daily_results:
-            return {"status": "no_backtest_results"}
-
-        total_return = daily_results[-1]["return_pct"] if daily_results else 0
-        avg_sharpe = sum(d["sharpe"] for d in daily_results) / len(daily_results)
-        total_trades = sum(d["trades"] for d in daily_results)
+        # Use actual backtest result fields
+        # Result may be BacktestResult or dict (error path)
+        actual_return = getattr(result, "total_return_pct", result.get("total_return_pct", 0) if isinstance(result, dict) else 0)
+        actual_sharpe = getattr(result, "sharpe_ratio", result.get("sharpe_ratio", 0) if isinstance(result, dict) else 0)
+        actual_trades = getattr(result, "total_trades", result.get("total_trades", 0) if isinstance(result, dict) else 0)
+        actual_win_rate = getattr(result, "win_rate", result.get("win_rate", 0) if isinstance(result, dict) else 0)
+        actual_max_dd = getattr(result, "max_drawdown", result.get("max_drawdown", 0) if isinstance(result, dict) else 0)
+        actual_winning = getattr(result, "winning_trades", result.get("winning_trades", 0) if isinstance(result, dict) else 0)
+        actual_losing = getattr(result, "losing_trades", result.get("losing_trades", 0) if isinstance(result, dict) else 0)
+        actual_avg_win = getattr(result, "avg_win", result.get("avg_win", 0) if isinstance(result, dict) else 0)
+        actual_avg_loss = getattr(result, "avg_loss", result.get("avg_loss", 0) if isinstance(result, dict) else 0)
 
         # Find when training starts to degrade (sharpe drops below threshold)
         sharpe_degradation_days = []
@@ -271,12 +260,17 @@ async def run_single_experiment(
             "backtest_period": f"{backtest_start.date()} to {backtest_end.date()}",
             "train_candles": len(train_series.candles),
             "backtest_candles": len(backtest_series.candles),
-            "total_return_pct": total_return,
-            "avg_sharpe": avg_sharpe,
-            "total_trades": total_trades,
-            "first_degradation_day": first_degradation_day,
-            "avg_trades_per_day": total_trades / len(daily_results) if daily_results else 0,
-            "daily_results": daily_results,
+            "total_return_pct": actual_return,
+            "avg_sharpe": actual_sharpe,
+            "total_trades": actual_trades,
+            "winning_trades": actual_winning,
+            "losing_trades": actual_losing,
+            "win_rate": actual_win_rate,
+            "avg_win": actual_avg_win,
+            "avg_loss": actual_avg_loss,
+            "max_drawdown": actual_max_dd,
+            "avg_trades_per_day": actual_trades / num_days if num_days > 0 else 0,
+            "daily_results": [],  # daily breakdown not yet implemented
         }
 
     except Exception as e:
@@ -391,23 +385,16 @@ async def main():
     successful = [r for r in all_results if r["status"] == "success"]
     if successful:
         logger.info(
-            f"\n{'Strategy':<20} {'Return%':<12} {'Sharpe':<10} {'Trades':<10} {'First Degrade Day':<20}"
+            f"\n{'Strategy':<20} {'Return%':<12} {'Sharpe':<10} {'WinRate':<10} {'Trades':<8} {'MaxDD$':<10} {'AvgWin':<10} {'AvgLoss':<10}"
         )
-        logger.info("-" * 80)
+        logger.info("-" * 100)
         for r in successful:
             logger.info(
                 f"{r['strategy']:<20} {r['total_return_pct']:>10.2f}% {r['avg_sharpe']:>9.2f} "
-                f"{r['total_trades']:>9} {r['first_degradation_day']:>19}"
+                f"{r.get('win_rate', 0):>9.1%} {r['total_trades']:>7} {r.get('max_drawdown', 0):>9.2f} {r.get('avg_win', 0):>9.2f} {r.get('avg_loss', 0):>9.2f}"
             )
 
-        # Best strategy
-        best = max(successful, key=lambda x: x["avg_sharpe"])
-        logger.info(f"\nBest Strategy: {best['strategy']} (Sharpe: {best['avg_sharpe']:.2f})")
-        logger.info(f"First degradation at day: {best['first_degradation_day']}")
-        if best["first_degradation_day"] < len(successful):
-            logger.info(f"Recommendation: Retrain every ~{best['first_degradation_day']} days")
-
-    logger.info(f"\nResults saved to: {args.output}")
+        logger.info(f"\nResults saved to: {args.output}")
 
 
 if __name__ == "__main__":

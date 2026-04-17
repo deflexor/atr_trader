@@ -381,6 +381,9 @@ class TradingSystem:
             ml_confidence = 0.3
             probs = np.array([0.33, 0.34, 0.33])
 
+        # Tag base signal with LSTM confidence for downstream gating
+        base_signal.ml_max_prob = float(probs.max())
+
         return MLEnhancedSignal(
             base_signal=base_signal,
             ml_strength=class_id,  # 0=DOWN, 1=FLAT, 2=UP

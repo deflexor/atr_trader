@@ -37,7 +37,7 @@ CLASS_UP = 2
 class ModelConfig:
     """Neural network configuration."""
 
-    num_features: int = 13  # features per timestep
+    num_features: int = 14  # features per timestep
     hidden_dims: list[int] = field(default_factory=lambda: [128, 64, 32])  # Full model
     num_classes: int = 3  # DOWN, FLAT, UP
     dropout: float = 0.3  # higher dropout for classification

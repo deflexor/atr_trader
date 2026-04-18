@@ -71,5 +71,31 @@
     "win_rate": 0.204,
     "max_drawdown": 236.09,
     "note": "Post-tightening diagnostic (no ML) - pure strategy signals, still too many trades"
+  },
+  {
+    "status": "success",
+    "symbol": "BTCUSDT",
+    "timeframe": "5m",
+    "strategy": "filter_optimization_summary",
+    "date": "2026-04-19",
+    "changes": [
+      "Relaxed momentum filters: ATR 0.1%→0.05%, pullback 0.5%→0.3%, volume_spike 2.0x→1.5x",
+      "Balanced mean reversion deviation_threshold at 2.5%",
+      "Reduced risk_per_trade: 2%→1.5%",
+      "Tightened trailing stops: 3.0→2.5 ATR",
+      "Enabled max_drawdown_pct halt at 5%"
+    ],
+    "momentum_results": {
+      "before": {"trades": 7, "win_rate": 0.571, "max_drawdown": 475},
+      "after_diagnostic": {"trades": 95, "win_rate": 0.305, "max_drawdown": 389},
+      "improvement": "13.6x more trades, lower drawdown despite more signals"
+    },
+    "mean_reversion_results": {
+      "before": {"trades": 370, "win_rate": 0.505, "max_drawdown": 398},
+      "after_diagnostic": {"trades": 1107, "win_rate": 0.204, "max_drawdown": 236},
+      "note": "Trade explosion suggests further tightening or ML filtering needed"
+    },
+    "key_finding": "Volume spike filter was blocking 92% of signals - primary cause of momentum undertrading",
+    "git_commit": "60895f5"
   }
 ]

@@ -21,12 +21,12 @@ class MeanReversionConfig(StrategyConfig):
     """Configuration for mean reversion strategy."""
 
     sma_period: int = 20
-    deviation_threshold: float = 0.02  # 2% deviation from SMA
+    deviation_threshold: float = 0.025  # 2.5% deviation from SMA (balanced)
     bollinger_period: int = 20
     bollinger_std: float = 2.0
     rsi_period: int = 14
-    rsi_oversold: float = 35.0
-    rsi_overbought: float = 65.0
+    rsi_oversold: float = 35.0  # Standard RSI oversold level
+    rsi_overbought: float = 65.0  # Standard RSI overbought level
 
 
 class MeanReversionStrategy(BaseStrategy):

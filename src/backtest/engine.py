@@ -31,7 +31,7 @@ class BacktestConfig:
     max_positions: int = 3
     pyramid_entries: int = 2  # Allow up to N entries per position (pyramiding)
     entry_spacing: float = 0.005  # Price must pullback 0.5% from extreme before 2nd entry
-    risk_per_trade: float = 0.02  # 2% of capital per trade
+    risk_per_trade: float = 0.015  # Reduced from 2% to 1.5% to minimize drawdown
     stop_loss_pct: float = 0.02  # 2% stop loss (fallback)
     take_profit_pct: float = 0.04  # 4% take profit (fallback, 2:1 R:R)
     use_atr_stops: bool = True  # Use ATR-based dynamic stops
@@ -40,9 +40,9 @@ class BacktestConfig:
     atr_tp_multiplier: float = 99.0  # Disabled — trailing stops only
     cooldown_candles: int = 4  # Wait 4 candles (20min on 5m) between trades
     use_trailing_stop: bool = True  # Enable trailing stops after activation
-    trailing_activation_atr: float = 3.0  # Activate after 3x ATR profit (let trend develop)
-    trailing_distance_atr: float = 3.0  # Trail at 3x ATR behind extreme (room to breathe)
-    max_drawdown_pct: float = 0.0  # Halt new entries when drawdown exceeds this (0 = disabled)
+    trailing_activation_atr: float = 2.5  # Reduced from 3.0 to activate earlier
+    trailing_distance_atr: float = 2.5  # Reduced from 3.0 to tighten protection
+    max_drawdown_pct: float = 0.05  # Enable 5% drawdown halt to protect capital
 
 
 @dataclass

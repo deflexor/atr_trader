@@ -28,51 +28,67 @@ from ..core.models.market_data import MarketData
 # Design: relaxed from previous over-filtered profiles that produced zero trades.
 # Key changes vs v1:
 #   - min_agreement lowered to 2 for more frequent entries (was 3)
-#   - pullback_enabled ON (0.5% retrace — best performing)
+#   - pullback_enabled ON (0.3% retrace — relaxed for more signals)
+#   - volume_spike_threshold reduced to 1.5x (was 2.0x — too strict, blocking 92%)
 ASSET_PROFILES: dict[str, dict] = {
-    # Default profiles: min_agreement=2 for more frequent entries, pullback enabled
+    # Default profiles: relaxed for higher signal capture
     "BTC": {
-        "atr_filter_min_pct": 0.001,
+        "atr_filter_min_pct": 0.0005,  # Relaxed from 0.001 (0.05% vs 0.1%)
         "min_agreement": 2,
         "momentum_threshold": 0.005,
         "pullback_enabled": True,
-        "pullback_retrace_min": 0.005,  # 0.5% pullback — best performing
+        "pullback_retrace_min": 0.003,  # Relaxed from 0.005 (0.3% vs 0.5%)
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
+        "volume_spike_threshold": 1.5,  # Relaxed from 2.0 (was blocking 92% of signals)
     },
     "ETH": {
-        "atr_filter_min_pct": 0.001,
+        "atr_filter_min_pct": 0.0005,
         "min_agreement": 2,
         "momentum_threshold": 0.005,
         "pullback_enabled": True,
-        "pullback_retrace_min": 0.005,
+        "pullback_retrace_min": 0.003,
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
+        "volume_spike_threshold": 1.5,
     },
     "DOGE": {
-        "atr_filter_min_pct": 0.002,
+        "atr_filter_min_pct": 0.001,  # Slightly higher for volatile asset
         "min_agreement": 2,
         "momentum_threshold": 0.005,
         "pullback_enabled": True,
-        "pullback_retrace_min": 0.006,  # slightly more for volatile assets
+        "pullback_retrace_min": 0.004,  # 0.4% for DOGE
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
+        "volume_spike_threshold": 1.5,
     },
     "TRX": {
-        "atr_filter_min_pct": 0.001,
+        "atr_filter_min_pct": 0.0005,
         "min_agreement": 2,
         "momentum_threshold": 0.005,
         "pullback_enabled": True,
-        "pullback_retrace_min": 0.005,
+        "pullback_retrace_min": 0.003,
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
+        "volume_spike_threshold": 1.5,
     },
     # Conservative profiles: tighter pullback, more agreement, entry candle confirmation
     "BTC_CONSERVATIVE": {
+        "atr_filter_min_pct": 0.0005,
+        "min_agreement": 4,
+        "momentum_threshold": 0.006,
+        "pullback_enabled": True,
+        "pullback_retrace_min": 0.005,
+        "rsi_divergence_enabled": True,
+        "entry_candle_required": True,
+        "mtf_enabled": True,
+        "volume_spike_threshold": 2.0,  # Conservative: require stronger volume
+    },
+    "ETH_CONSERVATIVE": {
         "atr_filter_min_pct": 0.001,
         "min_agreement": 4,
         "momentum_threshold": 0.006,
@@ -81,35 +97,28 @@ ASSET_PROFILES: dict[str, dict] = {
         "rsi_divergence_enabled": True,
         "entry_candle_required": True,
         "mtf_enabled": True,
-    },
-    "ETH_CONSERVATIVE": {
-        "atr_filter_min_pct": 0.0015,
-        "min_agreement": 4,
-        "momentum_threshold": 0.006,
-        "pullback_enabled": True,
-        "pullback_retrace_min": 0.005,
-        "rsi_divergence_enabled": True,
-        "entry_candle_required": True,
-        "mtf_enabled": True,
+        "volume_spike_threshold": 2.0,
     },
     # Aggressive profiles: no pullback, trade the breakout
     "BTC_AGGRESSIVE": {
-        "atr_filter_min_pct": 0.0005,
-        "min_agreement": 2,
+        "atr_filter_min_pct": 0.0003,
+        "min_agreement": 1,
         "momentum_threshold": 0.003,
         "pullback_enabled": False,
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
+        "volume_spike_threshold": 1.0,  # Aggressive: no volume filter
     },
     "ETH_AGGRESSIVE": {
-        "atr_filter_min_pct": 0.001,
-        "min_agreement": 2,
+        "atr_filter_min_pct": 0.0005,
+        "min_agreement": 1,
         "momentum_threshold": 0.003,
         "pullback_enabled": False,
         "rsi_divergence_enabled": False,
         "entry_candle_required": False,
         "mtf_enabled": False,
+        "volume_spike_threshold": 1.0,
     },
 }
 
@@ -158,6 +167,9 @@ class MomentumConfig(StrategyConfig):
     # Volatility filter
     atr_filter_enabled: bool = True  # Skip entries in low-vol conditions
     atr_filter_min_pct: float = 0.001  # Min ATR as % of price (0.1%) to enter (was 0.2%)
+
+    # Volume filter (relaxed from 2.0x to 1.5x to allow more signals)
+    volume_spike_threshold: float = 1.5  # Volume must be 1.5x average to enter (was 2.0x)
 
     # Regime selection: overrides asset-base lookup when set
     # e.g. "BTC_AGGRESSIVE", "BTC_CONSERVATIVE", "ETH_AGGRESSIVE"
@@ -687,8 +699,8 @@ class MomentumStrategy(BaseStrategy):
         if direction != SignalDirection.NEUTRAL:
             self.diagnostics["min_agreement_passed"] += 1
 
-            # 0. Volume spike: reject entries in low-volume chop
-            if not self._check_volume_spike(candles, mult=2.0):
+            # 0. Volume spike: reject entries in low-volume chop (use configured threshold)
+            if not self._check_volume_spike(candles, mult=cfg.volume_spike_threshold):
                 direction = SignalDirection.NEUTRAL
                 strength = 0.0
                 confidence = 0.0

@@ -426,19 +426,24 @@ class BacktestEngine:
         if atr and atr > 0 and self.config.atr_sl_multiplier < 99 and self.config.atr_tp_multiplier < 99:
             sl_distance = atr * self.config.atr_sl_multiplier
             tp_distance = atr * self.config.atr_tp_multiplier
+            if is_long:
+                stop_loss = fill_price - sl_distance
+                take_profit = fill_price + tp_distance
+            else:
+                stop_loss = fill_price + sl_distance
+                take_profit = fill_price - tp_distance
         elif self.config.use_trailing_stop:
-            sl_distance = 0  # Trailing stop only, no fixed SL
-            tp_distance = 0  # Trailing stop only, no fixed TP
+            stop_loss = None  # Trailing stop only — no fixed SL
+            take_profit = None  # Trailing stop only — no fixed TP
         else:
             sl_distance = fill_price * self.config.stop_loss_pct
             tp_distance = fill_price * self.config.take_profit_pct
-
-        if is_long:
-            stop_loss = fill_price - sl_distance
-            take_profit = fill_price + tp_distance
-        else:
-            stop_loss = fill_price + sl_distance
-            take_profit = fill_price - tp_distance
+            if is_long:
+                stop_loss = fill_price - sl_distance
+                take_profit = fill_price + tp_distance
+            else:
+                stop_loss = fill_price + sl_distance
+                take_profit = fill_price - tp_distance
 
         # Create position
         position = Position(

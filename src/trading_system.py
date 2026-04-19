@@ -14,6 +14,8 @@ from datetime import datetime
 from typing import Optional, Callable, Awaitable
 import logging
 
+import numpy as np
+
 from .adapters.kucoin_adapter import KuCoinAdapter
 from .adapters.bybit_adapter import BybitAdapter
 from .core.models.candle import Candle, CandleSeries
@@ -28,7 +30,7 @@ from .ml.model import (
     CLASS_UP,
     CLASS_DOWN,
 )
-from .ml.features import FeatureEngine, FeatureConfig
+from .ml.h1_model import H1Model, H1ModelConfig
 from .strategies.base_strategy import BaseStrategy
 from .backtest.engine import BacktestEngine, BacktestConfig
 
@@ -156,7 +158,8 @@ class TradingSystem:
                 horizon=self.config.prediction_horizon,
             )
         )
-        self.model: Optional[SignalPredictor] = None
+        self.model: Optional[SignalClassifier] = None
+        self.h1_model: Optional[H1Model] = None  # 1h LSTM for trend confirmation
         self.training_pipeline: Optional[TrainingPipeline] = None
         self._is_trained = False
 
@@ -244,8 +247,6 @@ class TradingSystem:
             return {"history": {}, "num_samples": 0}
 
         # Shuffle and split train/val
-        import numpy as np
-
         indices = np.arange(len(train_features))
         np.random.shuffle(indices)
         split = int(len(indices) * 0.8)
@@ -296,8 +297,6 @@ class TradingSystem:
         Returns:
             (features, labels) tuple for training
         """
-        import numpy as np
-
         window = self.config.feature_window
         horizon = self.config.prediction_horizon
 
@@ -405,9 +404,73 @@ class TradingSystem:
         """
         return BacktestEngine(config or BacktestConfig())
 
-    async def run_backtest_with_ml(
+    def load_h1_model(self, path: str) -> bool:
+        """Load H1Model from disk for trend confirmation.
+
+        Args:
+            path: Path to saved H1Model
+
+        Returns:
+            True if loaded successfully
+        """
+        try:
+            self.h1_model = H1Model()
+            self.h1_model.load(path)
+            logger.info(f"H1Model loaded from {path}")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not load H1Model from {path}: {e}")
+            self.h1_model = None
+            return False
+
+    def train_h1_model(
         self,
-        strategy: BaseStrategy,
+        train_features: np.ndarray,
+        train_labels: np.ndarray,
+        val_features: Optional[np.ndarray] = None,
+        val_labels: Optional[np.ndarray] = None,
+    ) -> dict:
+        """Train the 1h LSTM confirmation model.
+
+        Args:
+            train_features: Training features [num_samples, window_size, num_features]
+            train_labels: Training labels [num_samples] with values 0, 1, 2
+            val_features: Optional validation features
+            val_labels: Optional validation labels
+
+        Returns:
+            Training history dict
+        """
+        if self.h1_model is None:
+            self.h1_model = H1Model()
+
+        history = self.h1_model.train(
+            train_features,
+            train_labels,
+            val_features,
+            val_labels,
+        )
+        logger.info("H1Model training complete")
+        return history
+
+    def apply_h1_to_strategy(self, strategy: BaseStrategy) -> BaseStrategy:
+        """Pass H1Model to strategy for multi-timeframe confirmation.
+
+        Args:
+            strategy: Strategy to enhance with H1Model
+
+        Returns:
+            Same strategy instance (modified in place)
+        """
+        if self.h1_model is not None and hasattr(strategy, 'h1_model'):
+            strategy.h1_model = self.h1_model
+            logger.info("H1Model applied to strategy for 1h trend confirmation")
+        else:
+            logger.warning("Cannot apply H1Model: model not loaded or strategy doesn't support it")
+
+        return strategy
+
+    async def run_backtest_with_ml(
         candles: CandleSeries,
         initial_capital: float = 10000.0,
     ) -> dict:

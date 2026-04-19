@@ -83,41 +83,84 @@ class KuCoinAdapter:
     async def _handle_message(self, data: dict) -> None:
         """Handle incoming WebSocket message."""
         try:
-            if data.get("type") == "message" and "ticker" in data.get("topic", ""):
-                topic = data.get("topic", "")
-                symbol = self._denormalize_symbol(topic.split(":")[-1])
+            topic = data.get("topic", "")
 
-                msg_data = data.get("data", {})
-                if "bestBid" in msg_data and "bestAsk" in msg_data:
-                    best_bid = float(msg_data["bestBid"])
-                    best_ask = float(msg_data["bestAsk"])
-                    bid_size = float(msg_data.get("bestBidSize", 0))
-                    ask_size = float(msg_data.get("bestAskSize", 0))
-                    last_price = float(msg_data.get("last", best_bid))
-                    volume = float(msg_data.get("size", 0))
-
-                    market_data = MarketData(
-                        symbol=symbol,
-                        exchange="kucoin",
-                        bid=best_bid,
-                        ask=best_ask,
-                        bid_size=bid_size,
-                        ask_size=ask_size,
-                        last_price=last_price,
-                        volume=volume,
-                        timestamp=datetime.utcnow(),
-                    )
-
-                    self._price_cache[symbol] = market_data
-
-                    for subscriber in self._subscribers:
-                        try:
-                            subscriber(market_data)
-                        except Exception as e:
-                            logger.warning(f"Subscriber error: {e}")
+            if data.get("type") == "message":
+                if "ticker" in topic:
+                    await self._handle_ticker_message(data)
+                elif "candles" in topic:
+                    await self._handle_candle_message(data)
 
         except Exception as e:
             logger.debug(f"Error handling KuCoin message: {e}")
+
+    async def _handle_ticker_message(self, data: dict) -> None:
+        """Handle ticker WebSocket message."""
+        topic = data.get("topic", "")
+        symbol = self._denormalize_symbol(topic.split(":")[-1])
+
+        msg_data = data.get("data", {})
+        if "bestBid" in msg_data and "bestAsk" in msg_data:
+            best_bid = float(msg_data["bestBid"])
+            best_ask = float(msg_data["bestAsk"])
+            bid_size = float(msg_data.get("bestBidSize", 0))
+            ask_size = float(msg_data.get("bestAskSize", 0))
+            last_price = float(msg_data.get("last", best_bid))
+            volume = float(msg_data.get("size", 0))
+
+            market_data = MarketData(
+                symbol=symbol,
+                exchange="kucoin",
+                bid=best_bid,
+                ask=best_ask,
+                bid_size=bid_size,
+                ask_size=ask_size,
+                last_price=last_price,
+                volume=volume,
+                timestamp=datetime.utcnow(),
+            )
+
+            self._price_cache[symbol] = market_data
+
+            for subscriber in self._subscribers:
+                try:
+                    subscriber(market_data)
+                except Exception as e:
+                    logger.warning(f"Subscriber error: {e}")
+
+    async def _handle_candle_message(self, data: dict) -> None:
+        """Handle candle WebSocket message.
+
+        KuCoin candle data format:
+        [timestamp, open, close, high, low, volume, turnover]
+        """
+        topic = data.get("topic", "")
+        symbol = self._denormalize_symbol(topic.split(":")[-1].split("_")[0])
+
+        msg_data = data.get("data", {})
+        candle = msg_data.get("candles", [])
+
+        if len(candle) >= 6:
+            # Update price cache with latest candle close
+            last_price = float(candle[2])
+            market_data = MarketData(
+                symbol=symbol,
+                exchange="kucoin",
+                bid=last_price,
+                ask=last_price,
+                bid_size=0,
+                ask_size=0,
+                last_price=last_price,
+                volume=float(candle[5]),
+                timestamp=datetime.utcnow(),
+            )
+            self._price_cache[symbol] = market_data
+
+            for subscriber in self._subscribers:
+                try:
+                    subscriber(market_data)
+                except Exception as e:
+                    logger.warning(f"Subscriber error: {e}")
 
     async def _connection_handler(self) -> None:
         """Main WebSocket connection handler with auto-reconnect."""
@@ -218,6 +261,44 @@ class KuCoinAdapter:
                 "response": True,
             }
             await self._ws.send(json.dumps(subscribe_msg))
+            await asyncio.sleep(0.1)
+
+    def subscribe_candles(self, symbols: list[str], timeframe: str = "1m") -> None:
+        """Subscribe to candle updates for symbols.
+
+        Args:
+            symbols: Trading pair symbols
+            timeframe: Candle timeframe ('1m', '5m', '15m', '1h', '4h', '1d')
+        """
+        normalized_symbols = [self._normalize_symbol(s) for s in symbols]
+        for symbol in normalized_symbols:
+            self._symbols.add(symbol)
+
+        if self._running and self._ws:
+            asyncio.create_task(self._subscribe_candles_symbols(list(normalized_symbols), timeframe))
+
+    async def _subscribe_candles_symbols(self, symbols: list[str], timeframe: str) -> None:
+        """Subscribe to candle data for symbols via WebSocket.
+
+        KuCoin WebSocket candle topic: /market/candles:{symbol}_{type}
+        where type is 1min, 5min, 15min, 1hour, 4hour, 1day
+        """
+        if not self._ws:
+            return
+
+        kucoin_timeframe = timeframe.replace("m", "min")
+
+        for i, symbol in enumerate(symbols):
+            subscribe_msg = {
+                "id": str(int(time.time()) + i),
+                "type": "subscribe",
+                "topic": f"/market/candles:{symbol}_{kucoin_timeframe}",
+                "privateChannel": False,
+                "response": True,
+            }
+            await self._ws.send(json.dumps(subscribe_msg))
+            if i < 5:
+                logger.info(f"Sent KuCoin candle subscribe: {symbol} {kucoin_timeframe}")
             await asyncio.sleep(0.1)
 
     def add_subscriber(self, callback: Callable[[MarketData], None]) -> None:
@@ -322,6 +403,7 @@ class KuCoinAdapter:
                 "1day": 86400,
             }
             tf_seconds = timeframe_seconds.get(kucoin_timeframe, 60)
+
             back_seconds = tf_seconds * (limit + 500)
             start_at = int(time.time()) - back_seconds
 
@@ -373,59 +455,41 @@ class KuCoinAdapter:
         normalized = self._normalize_symbol(symbol)
         kucoin_timeframe = timeframe.replace("m", "min")
 
-        # Calculate timestamps for each day going backwards
-        timeframe_seconds = {
-            "1min": 60,
-            "5min": 300,
-            "15min": 900,
-            "1hour": 3600,
-            "4hour": 14400,
-            "1day": 86400,
-        }
-        tf_seconds = timeframe_seconds.get(kucoin_timeframe, 60)
-        days_in_chunk = min(days, 30)  # Request in chunks of ~30 days to stay within limits
+        # Calculate timestamps - fetch from (now - days) to now
+        now = int(time.time())
+        start_at = now - (days * 86400)
+        end_at = now
 
         all_candles = []
-        now = int(time.time())
+        seen: set[int] = set()
 
-        for chunk_start in range(days, 0, -days_in_chunk):
-            chunk_end = chunk_start
-            chunk_start_ts = now - (chunk_start * 86400)
-            chunk_end_ts = now - (chunk_end * 86400) + 86400
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Fetch up to 2000 candles (API limit)
+                url = f"{self.config.rest_url}/api/v1/market/candles?symbol={normalized}&type={kucoin_timeframe}&limit=2000&startAt={start_at}"
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                    if data.get("code") != "200000":
+                        logger.warning(f"KuCoin fetch error: {data.get('msg')}")
+                        return []
 
-            try:
-                async with aiohttp.ClientSession() as session:
-                    url = f"{self.config.rest_url}/api/v1/market/candles?symbol={normalized}&type={kucoin_timeframe}&limit=2000&startAt={chunk_start_ts}"
-                    async with session.get(url) as resp:
-                        data = await resp.json()
-                        if data.get("code") != "200000":
-                            logger.warning(f"KuCoin chunk error: {data.get('msg')}")
-                            continue
+                    candles = data.get("data", [])
+                    if not candles:
+                        return []
 
-                        candles = data.get("data", [])
-                        if candles:
-                            # Filter to only include candles within our date range
-                            for candle in candles:
-                                ts = int(candle[0])
-                                if chunk_start_ts <= ts <= chunk_end_ts:
-                                    all_candles.append(candle)
+                    # Sort oldest-first
+                    candles.sort(key=lambda x: int(x[0]))
 
-            except Exception as e:
-                logger.error(f"KuCoin chunk error: {e}")
-                continue
+                    # Filter to requested time range and deduplicate
+                    for candle in candles:
+                        ts = int(candle[0])
+                        if start_at <= ts <= end_at and ts not in seen:
+                            seen.add(ts)
+                            all_candles.append(candle)
 
-            # Rate limiting
-            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"KuCoin fetch error: {e}")
+            return []
 
-        # Sort oldest-first and deduplicate
-        all_candles.sort(key=lambda x: int(x[0]))
-        seen = set()
-        result = []
-        for candle in all_candles:
-            ts = int(candle[0])
-            if ts not in seen:
-                seen.add(ts)
-                result.append(candle)
-
-        logger.info(f"Fetched {len(result)} candles for {symbol} over {days} days")
-        return result
+        logger.info(f"Fetched {len(all_candles)} candles for {symbol} over {days} days")
+        return all_candles

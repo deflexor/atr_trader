@@ -224,11 +224,6 @@ async def run_single_experiment(
             initial_capital=10000.0,
         )
 
-        logger.info(
-            f"Backtest complete: Return={actual_return:.2f}%, "
-            f"Sharpe={actual_sharpe:.2f}, WinRate={actual_win_rate:.1%}, Trades={actual_trades} ({actual_winning}W/{actual_losing}L)"
-        )
-
         # Use actual backtest result fields
         # Result may be BacktestResult or dict (error path)
         actual_return = getattr(result, "total_return_pct", result.get("total_return_pct", 0) if isinstance(result, dict) else 0)
@@ -240,6 +235,11 @@ async def run_single_experiment(
         actual_losing = getattr(result, "losing_trades", result.get("losing_trades", 0) if isinstance(result, dict) else 0)
         actual_avg_win = getattr(result, "avg_win", result.get("avg_win", 0) if isinstance(result, dict) else 0)
         actual_avg_loss = getattr(result, "avg_loss", result.get("avg_loss", 0) if isinstance(result, dict) else 0)
+
+        logger.info(
+            f"Backtest complete: Return={actual_return:.2f}%, "
+            f"Sharpe={actual_sharpe:.2f}, WinRate={actual_win_rate:.1%}, Trades={actual_trades} ({actual_winning}W/{actual_losing}L)"
+        )
 
         # Find when training starts to degrade (sharpe drops below threshold)
         sharpe_degradation_days = []

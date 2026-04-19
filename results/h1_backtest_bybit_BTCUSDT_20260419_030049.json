@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-04-19T03:00:49.103511",
+  "source": "bybit",
+  "symbol": "BTCUSDT",
+  "days": 7,
+  "baseline": {
+    "total_trades": 14,
+    "win_rate": 0.35714285714285715,
+    "total_return_pct": 0.018644691841927852,
+    "max_drawdown": 227.37443809204524,
+    "sharpe_ratio": 4447.53816053691
+  },
+  "h1_enhanced": {
+    "total_trades": 14,
+    "win_rate": 0.35714285714285715,
+    "total_return_pct": 0.018644696867631864,
+    "max_drawdown": 227.374428082574,
+    "sharpe_ratio": 3607.724866581007
+  }
+}

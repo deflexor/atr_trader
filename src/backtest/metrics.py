@@ -149,7 +149,7 @@ class PerformanceMetrics:
             if drawdown > max_dd:
                 max_dd = drawdown
 
-        self.max_drawdown = max_dd
+        self.max_drawdown = max_dd / peak * 100 if peak > 0 else 0.0
 
     def _calculate_sharpe(
         self, pnls: list[float], risk_free_rate: float, trades_per_year: float = 252.0

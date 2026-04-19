@@ -61,7 +61,7 @@ class DataStore:
         conn.close()
 
     def save_candles(self, candles: list[Candle]) -> int:
-        """Save candles to the database.
+        """Save candles to the database using batch insert.
 
         Args:
             candles: List of Candle objects to save
@@ -75,33 +75,39 @@ class DataStore:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        inserted = 0
-        for candle in candles:
-            try:
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE INTO candles
-                    (symbol, exchange, timeframe, timestamp, open, high, low, close, volume)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        candle.symbol,
-                        candle.exchange,
-                        candle.timeframe,
-                        int(candle.timestamp.timestamp()),
-                        candle.open,
-                        candle.high,
-                        candle.low,
-                        candle.close,
-                        candle.volume,
-                    ),
-                )
-                if cursor.rowcount > 0:
-                    inserted += 1
-            except Exception as e:
-                logger.debug(f"Skipping candle {candle.timestamp}: {e}")
+        # Batch insert using executemany with transaction
+        rows = [
+            (
+                c.symbol,
+                c.exchange,
+                c.timeframe,
+                int(c.timestamp.timestamp()),
+                c.open,
+                c.high,
+                c.low,
+                c.close,
+                c.volume,
+            )
+            for c in candles
+        ]
 
-        conn.commit()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            cursor.executemany(
+                """
+                INSERT OR IGNORE INTO candles
+                (symbol, exchange, timeframe, timestamp, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+            inserted = cursor.rowcount
+        except Exception as e:
+            conn.rollback()
+            logger.debug(f"Batch insert failed: {e}")
+            inserted = 0
+
         conn.close()
         logger.info(f"Saved {inserted} new candles to {self.db_path}")
         return inserted

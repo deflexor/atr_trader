@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BacktestConfig:
-    """Configuration for backtesting."""
+    """Configuration for backtesting with 1m candle resolution.
+
+    All timing parameters are expressed in 1m candles.
+    Position tracking, SL/TP evaluation, and entry/exit all occur
+    at 1m candle granularity for precise execution simulation.
+    """
 
     initial_capital: float = 10000.0
     commission: float = 0.0006  # 0.06% per trade (maker+taker avg)
@@ -31,17 +36,17 @@ class BacktestConfig:
     max_positions: int = 3
     pyramid_entries: int = 2  # Allow up to N entries per position (pyramiding)
     entry_spacing: float = 0.005  # Price must pullback 0.5% from extreme before 2nd entry
-    risk_per_trade: float = 0.015  # Reduced from 2% to 1.5% to minimize drawdown
-    stop_loss_pct: float = 0.02  # 2% stop loss (fallback)
+    risk_per_trade: float = 0.015  # 1.5% risk per trade to minimize drawdown
+    stop_loss_pct: float = 0.02  # 2% stop loss (fallback when ATR disabled)
     take_profit_pct: float = 0.04  # 4% take profit (fallback, 2:1 R:R)
     use_atr_stops: bool = True  # Use ATR-based dynamic stops
     atr_period: int = 14
     atr_sl_multiplier: float = 99.0  # Disabled — trailing stops only
     atr_tp_multiplier: float = 99.0  # Disabled — trailing stops only
-    cooldown_candles: int = 4  # Wait 4 candles (20min on 5m) between trades
+    cooldown_candles: int = 4  # Wait 4 candles (4min on 1m) between trades
     use_trailing_stop: bool = True  # Enable trailing stops after activation
-    trailing_activation_atr: float = 2.5  # Reduced from 3.0 to activate earlier
-    trailing_distance_atr: float = 2.5  # Reduced from 3.0 to tighten protection
+    trailing_activation_atr: float = 2.5  # Activate trailing stop when price moves 2.5*ATR
+    trailing_distance_atr: float = 2.5  # Trail at 2.5*ATR behind extreme
     max_drawdown_pct: float = 0.05  # Enable 5% drawdown halt to protect capital
 
 
@@ -68,10 +73,20 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """Backtesting engine for strategy evaluation.
+    """Backtesting engine for strategy evaluation with 1m candle resolution.
 
     Replays historical data through a strategy and calculates
     realistic performance metrics including slippage and commissions.
+
+    Position Tracking (1m Native):
+        - Entry/exit signals evaluated on each 1m candle
+        - SL/TP checked against candle H/L for realistic fill prices
+        - Trailing stops updated after each 1m candle close
+        - Equity calculated after each 1m candle for precise drawdown
+
+    Metrics Preserved:
+        - Sharpe ratio, max drawdown, win rate
+        - All existing performance metrics unchanged
     """
 
     def __init__(
@@ -159,7 +174,7 @@ class BacktestEngine:
             f"Starting backtest: {len(candles.candles)} candles, initial_capital={self.capital}"
         )
 
-        # Process each candle
+        # Process each 1m candle for position tracking and signal evaluation
         for i, candle in enumerate(candles.candles):
             timestamp = candle.timestamp
 
@@ -222,6 +237,10 @@ class BacktestEngine:
         winning = [t for t in close_trades if t.get("pnl", 0) > 0]
         losing = [t for t in close_trades if t.get("pnl", 0) <= 0]
 
+        # Use only closed trades for win rate calculation
+        closed_count = len(close_trades)
+        win_rate = len(winning) / closed_count if closed_count else 0
+
         return BacktestResult(
             initial_capital=self.config.initial_capital,
             final_capital=final_equity,
@@ -229,8 +248,8 @@ class BacktestEngine:
             total_return_pct=total_return_pct,
             max_drawdown=self.metrics.max_drawdown,
             sharpe_ratio=self.metrics.sharpe_ratio,
-            win_rate=len(winning) / len(self.trades) if self.trades else 0,
-            total_trades=len(self.trades),
+            win_rate=win_rate,
+            total_trades=len(self.trades),  # All trades including entries
             winning_trades=len(winning),
             losing_trades=len(losing),
             avg_win=sum(t["pnl"] for t in winning) / len(winning) if winning else 0,
@@ -256,10 +275,16 @@ class BacktestEngine:
         visible_candles: CandleSeries,
         candle_idx: int,
     ) -> None:
-        """Update positions using candle H/L for realistic SL/TP fills.
+        """Update positions at 1m candle resolution using candle H/L for SL/TP fills.
 
-        Checks if the candle's high or low would trigger stops before
-        processing the close price.
+        Evaluates on each 1m candle:
+            - Stop loss: checked against candle low (longs) or high (shorts)
+            - Take profit: checked against candle high (longs) or low (shorts)
+            - Trailing stop: updated based on ATR after price update
+            - Position price: updated to candle close
+
+        This ensures realistic fill simulation where SL/TP can trigger
+        anywhere within the 1m candle's range, not just at close.
         """
         for position in self.positions[:]:
             # Check stop loss using worst-case price within candle

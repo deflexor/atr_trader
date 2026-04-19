@@ -263,7 +263,7 @@ class SignalClassifier(nn.Module):
 
     def load(self, path: str) -> None:
         """Load model from disk."""
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, weights_only=False)
         self.load_state_dict(checkpoint["model_state"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
         logger.info(f"Model loaded from {path}")

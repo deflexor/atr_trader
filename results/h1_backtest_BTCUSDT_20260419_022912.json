@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-04-19T02:29:12.323476",
+  "symbol": "BTCUSDT",
+  "candles": 5000,
+  "baseline": {
+    "total_trades": 2,
+    "win_rate": 0.5,
+    "total_return_pct": -0.00017735904959408799,
+    "max_drawdown": 150.1865540713261,
+    "sharpe_ratio": 0.0
+  },
+  "h1_enhanced": {
+    "total_trades": 2,
+    "win_rate": 0.5,
+    "total_return_pct": -0.00017733422761011751,
+    "max_drawdown": 150.18655407299593,
+    "sharpe_ratio": 0.0
+  }
+}

@@ -8,6 +8,7 @@ Uses:
 - RSI for trend strength (not overbought/oversold)
 - MACD histogram for momentum acceleration
 - Volume confirmation
+- H1Model LSTM as confirmation filter (1h trend must agree)
 """
 
 from __future__ import annotations
@@ -18,8 +19,9 @@ import statistics
 
 from .base_strategy import BaseStrategy, StrategyConfig
 from ..core.models.signal import Signal, SignalDirection
-from ..core.models.candle import CandleSeries
+from ..core.models.candle import Candle, CandleSeries
 from ..core.models.market_data import MarketData
+from ..ml.h1_model import H1Model
 
 
 # Preset profiles keyed by quote-agnostic base (e.g. "BTC", "ETH", "DOGE", "TRX")
@@ -133,6 +135,15 @@ def _asset_base(symbol: str) -> str:
 class MomentumConfig(StrategyConfig):
     """Configuration for momentum strategy."""
 
+    # Kelly Criterion sizing
+    kelly_sizing_enabled: bool = False  # Use Kelly formula for position sizing
+    kelly_max_pct: float = 0.10  # 10% cap on Kelly position size
+
+    # Best trailing stop from optimization
+    trailing_activation_atr: float = 3.0  # Activate when price moves 3.0*ATR
+    trailing_distance_atr: float = 2.5  # Trail at 2.5*ATR behind extreme
+
+    # Standard momentum settings
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_period: int = 14
@@ -188,16 +199,24 @@ class MomentumStrategy(BaseStrategy):
     Genuine momentum: aligns multiple trend indicators.
     Goes LONG when: EMA fast > slow AND RSI > 50 AND MACD histogram positive
     Goes SHORT when: EMA fast < slow AND RSI < 50 AND MACD histogram negative
+
+    H1Model Integration:
+        - 1m signal generated from price action
+        - H1Model checks 1h LSTM confirmation
+        - If 1h trend agrees, proceed; otherwise filter out
     """
 
-    def __init__(self, config: Optional[MomentumConfig] = None):
+    def __init__(self, config: Optional[MomentumConfig] = None, h1_model: Optional[H1Model] = None):
         super().__init__(config or MomentumConfig(name="momentum"))
         self.momentum_config = config or MomentumConfig(name="momentum")
+        self.h1_model = h1_model  # Optional: for 1h trend confirmation
         self._asset_overrides: dict[str, MomentumConfig] = {}
         self._mtf_hour_bucket: int = -1
         self._mtf_resampled: list[list[float]] = []  # [[o, h, l, c, v], ...]
         self._mtf_symbol: str = ""
         self._mtf_exchange: str = ""
+        # Kelly sizing tracker
+        self._kelly_sizer = KellyPositionSizer(max_kelly_pct=self.momentum_config.kelly_max_pct)
         # Diagnostics: count signals at each filter stage
         self.diagnostics: dict[str, int] = {
             "total_evaluated": 0,
@@ -205,6 +224,7 @@ class MomentumStrategy(BaseStrategy):
             "indicators_computed": 0,
             "min_agreement_passed": 0,
             "mtf_filtered": 0,
+            "h1_model_filtered": 0,
             "pullback_filtered": 0,
             "rsi_divergence_filtered": 0,
             "entry_candle_filtered": 0,
@@ -444,6 +464,113 @@ class MomentumStrategy(BaseStrategy):
 
         return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
 
+    def calculate_adx(self, candles: CandleSeries, period: int = 14) -> float:
+        """Calculate Average Directional Index (ADX) to measure trend strength.
+
+        ADX > 25 indicates TRENDING market
+        ADX <= 25 indicates RANGING market
+
+        Uses the standard ADX calculation:
+        - +DM (directional movement positive)
+        - -DM (directional movement negative)
+        - True Range
+        - Smoothed averages
+
+        Returns:
+            ADX value (0-100)
+        """
+        if len(candles.candles) < period * 2 + 1:
+            return 0.0
+
+        n = len(candles.candles)
+
+        # Calculate True Range and Directional Movements
+        tr_list = []
+        plus_dm_list = []
+        minus_dm_list = []
+
+        for i in range(1, n):
+            c = candles.candles[i]
+            prev_c = candles.candles[i - 1]
+
+            # True Range
+            tr = max(
+                c.high - c.low,
+                abs(c.high - prev_c.close),
+                abs(c.low - prev_c.close),
+            )
+            tr_list.append(tr)
+
+            # +DM and -DM
+            high_diff = c.high - prev_c.high
+            low_diff = prev_c.low - c.low
+
+            plus_dm = high_diff if high_diff > low_diff and high_diff > 0 else 0.0
+            minus_dm = low_diff if low_diff > high_diff and low_diff > 0 else 0.0
+
+            plus_dm_list.append(plus_dm)
+            minus_dm_list.append(minus_dm)
+
+        if len(tr_list) < period:
+            return 0.0
+
+        # Smooth using Wilder's method (similar to ATR calculation)
+        # Initial smoothed values
+        smoothed_tr = sum(tr_list[:period])
+        smoothed_plus_dm = sum(plus_dm_list[:period])
+        smoothed_minus_dm = sum(minus_dm_list[:period])
+
+        # Calculate smoothed +DI and -DI
+        plus_di_list = []
+        minus_di_list = []
+        dx_list = []
+
+        for i in range(period, len(tr_list)):
+            # Update smoothed values
+            smoothed_tr = smoothed_tr - (smoothed_tr / period) + tr_list[i]
+            smoothed_plus_dm = smoothed_plus_dm - (smoothed_plus_dm / period) + plus_dm_list[i]
+            smoothed_minus_dm = smoothed_minus_dm - (smoothed_minus_dm / period) + minus_dm_list[i]
+
+            if smoothed_tr == 0:
+                continue
+
+            plus_di = 100 * (smoothed_plus_dm / smoothed_tr)
+            minus_di = 100 * (smoothed_minus_dm / smoothed_tr)
+
+            di_sum = plus_di + minus_di
+            if di_sum == 0:
+                dx = 0
+            else:
+                dx = 100 * abs(plus_di - minus_di) / di_sum
+
+            plus_di_list.append(plus_di)
+            minus_di_list.append(minus_di)
+            dx_list.append(dx)
+
+        if len(dx_list) < period:
+            return 0.0
+
+        # Calculate ADX as the average of DX values
+        adx = sum(dx_list[-period:]) / period
+        return adx
+
+    def detect_market_regime(self, candles: CandleSeries) -> str:
+        """Detect if market is TRENDING or RANGING using ADX.
+
+        ADX > 25 = TRENDING (strong directional movement)
+        ADX <= 25 = RANGING (weak/no directional movement)
+
+        Args:
+            candles: Candle series for analysis
+
+        Returns:
+            "TRENDING" or "RANGING"
+        """
+        adx = self.calculate_adx(candles, period=14)
+        if adx > 25:
+            return "TRENDING"
+        return "RANGING"
+
     def detect_regime(self, candles: CandleSeries) -> str:
         """Detect market regime based on ATR percentile.
 
@@ -573,6 +700,106 @@ class MomentumStrategy(BaseStrategy):
             return ema_f > ema_s
         else:
             return ema_f < ema_s
+
+    def _get_1h_candles(self, candles_1m: CandleSeries) -> list:
+        """Extract 1h candles from 1m series by aggregation.
+
+        Args:
+            candles_1m: 1-minute candle series
+
+        Returns:
+            List of 1h Candle objects suitable for H1Model
+        """
+        if len(candles_1m.candles) < 60:
+            return []
+
+        # Aggregate 1m candles into 1h buckets
+        h1_candles = []
+        n = len(candles_1m.candles)
+
+        for i in range(0, n, 60):
+            chunk = candles_1m.candles[i : min(i + 60, n)]
+            if len(chunk) < 30:  # Need at least 30 mins of data
+                continue
+
+            h1_candle = Candle(
+                symbol=chunk[0].symbol,
+                exchange=chunk[0].exchange,
+                timeframe="1h",
+                timestamp=chunk[0].timestamp,
+                open=chunk[0].open,
+                high=max(c.high for c in chunk),
+                low=min(c.low for c in chunk),
+                close=chunk[-1].close,
+                volume=sum(c.volume for c in chunk),
+            )
+            h1_candles.append(h1_candle)
+
+        return h1_candles
+
+    async def multi_timeframe_signal(
+        self,
+        symbol: str,
+        candles_1m: CandleSeries,
+        market_data: Optional[MarketData] = None,
+    ) -> tuple[Signal, dict]:
+        """Combine 1m signal with 1h LSTM confirmation.
+
+        Strategy:
+            1. Get 1m signal from momentum indicators
+            2. Get 1h LSTM prediction for trend confirmation
+            3. Only proceed if both agree on direction
+
+        Args:
+            symbol: Trading pair
+            candles_1m: 1-minute candles for entry signals
+            market_data: Optional market data
+
+        Returns:
+            (signal, mtf_info) tuple where mtf_info contains H1Model data
+        """
+        mtf_info = {
+            "1m_direction": None,
+            "h1_direction": None,
+            "h1_confidence": 0.0,
+            "h1_trend_agrees": False,
+            "h1_probabilities": None,
+        }
+
+        # Step 1: Generate 1m signal
+        signal_1m = await self.generate_signal(symbol, candles_1m, market_data)
+        mtf_info["1m_direction"] = signal_1m.direction.value if signal_1m.direction else "NEUTRAL"
+
+        # If 1m signal is neutral, no need to check H1Model
+        if signal_1m.direction == SignalDirection.NEUTRAL:
+            return signal_1m, mtf_info
+
+        # Step 2: Get H1Model confirmation if available
+        if self.h1_model is None:
+            mtf_info["h1_trend_agrees"] = True  # No H1Model, skip confirmation
+            return signal_1m, mtf_info
+
+        h1_candles = self._get_1h_candles(candles_1m)
+        if not h1_candles:
+            mtf_info["h1_trend_agrees"] = True  # Not enough 1h data, skip
+            return signal_1m, mtf_info
+
+        trend_agrees, h1_direction, h1_confidence, h1_probs = (
+            self.h1_model.confirm_trend(h1_candles, market_data)
+        )
+
+        mtf_info["h1_direction"] = {0: "DOWN", 1: "FLAT", 2: "UP"}.get(h1_direction, "UNKNOWN")
+        mtf_info["h1_confidence"] = h1_confidence
+        mtf_info["h1_trend_agrees"] = trend_agrees
+        mtf_info["h1_probabilities"] = h1_probs.tolist() if h1_probs is not None else None
+
+        # If H1Model disagrees, neutralize the signal
+        if not trend_agrees:
+            signal_1m.direction = SignalDirection.NEUTRAL
+            signal_1m.strength = 0.0
+            signal_1m.confidence = 0.0
+
+        return signal_1m, mtf_info
 
     async def generate_signal(
         self,
@@ -716,7 +943,29 @@ class MomentumStrategy(BaseStrategy):
                     confidence = 0.0
                     self.diagnostics["mtf_filtered"] += 1
 
-            # 1. Pullback: wait for price to dip from recent extreme
+            # 2. H1Model LSTM confirmation: 1h trend must agree with 1m direction
+            if direction != SignalDirection.NEUTRAL and self.h1_model is not None:
+                # Get 1h candles for H1Model confirmation
+                h1_candles = self._get_1h_candles(candles)
+                if h1_candles and len(h1_candles) >= 60:
+                    _, h1_direction, h1_confidence, h1_probs = (
+                        self.h1_model.confirm_trend(h1_candles, market_data)
+                    )
+                    # Block if 1h LSTM disagrees with 1m signal direction
+                    # H1Model: 2=UP, 1=FLAT, 0=DOWN
+                    # is_long=True means 1m signal is LONG (want H1Model UP)
+                    # is_long=False means 1m signal is SHORT (want H1Model DOWN)
+                    h1_agrees = (
+                        (is_long and h1_direction == 2) or
+                        (not is_long and h1_direction == 0)
+                    )
+                    if not h1_agrees:
+                        direction = SignalDirection.NEUTRAL
+                        strength = 0.0
+                        confidence = 0.0
+                        self.diagnostics["h1_model_filtered"] += 1
+
+            # 3. Pullback: wait for price to dip from recent extreme
             if cfg.pullback_enabled and ema_fast is not None:
                 if not self._check_pullback(
                     closes, ema_fast, is_long, cfg.pullback_lookback, cfg.pullback_retrace_min
@@ -773,8 +1022,25 @@ class MomentumStrategy(BaseStrategy):
         portfolio_value: float,
         risk_per_trade: float = 0.02,
     ) -> float:
-        """Calculate position size based on risk management."""
+        """Calculate position size based on risk management or Kelly Criterion.
+
+        Args:
+            signal: Trading signal with direction and price
+            portfolio_value: Current portfolio value
+            risk_per_trade: Default risk % if Kelly disabled
+
+        Returns:
+            Position size in base currency units
+        """
         if signal.direction == SignalDirection.NEUTRAL:
+            return 0.0
+
+        if self.momentum_config.kelly_sizing_enabled:
+            kelly_pct = self._kelly_sizer.calculate_kelly_pct()
+            effective_risk = kelly_pct * signal.strength if signal.strength > 0 else kelly_pct
+            position_value = portfolio_value * effective_risk
+            if signal.price > 0:
+                return position_value / signal.price
             return 0.0
 
         risk_amount = portfolio_value * risk_per_trade
@@ -784,3 +1050,113 @@ class MomentumStrategy(BaseStrategy):
             return adjusted_risk / signal.price
 
         return 0.0
+
+    def record_trade_for_kelly(self, pnl: float) -> None:
+        """Record a closed trade's PnL for Kelly calculation.
+
+        Call this after each trade closes to update Kelly statistics.
+        """
+        self._kelly_sizer.record_trade(pnl)
+
+
+def calculate_kelly_fraction(win_rate: float, avg_win_loss_ratio: float) -> float:
+    """Calculate Kelly Criterion position size as fraction of capital.
+
+    Formula: f* = (b × p - q) / b
+    Where: p = win rate, q = 1-p, b = odds ratio (avg_win / avg_loss)
+
+    Args:
+        win_rate: Probability of winning (0.0 to 1.0)
+        avg_win_loss_ratio: Ratio of average win to average loss (e.g., 2.0 = twice as big as loss)
+
+    Returns:
+        Kelly percentage capped at 10% for safety
+    """
+    if avg_win_loss_ratio <= 0 or win_rate < 0 or win_rate > 1:
+        return 0.0
+
+    p = win_rate
+    q = 1.0 - p
+    b = avg_win_loss_ratio
+
+    # Kelly formula: (b * p - q) / b
+    kelly = (b * p - q) / b
+
+    # Cap at 10% maximum (practical safety limit)
+    return max(0.0, min(0.10, kelly))
+
+
+class KellyPositionSizer:
+    """Tracks trade history and calculates Kelly-based position sizes.
+
+    Pure implementation - no side effects, thread-safe.
+    """
+
+    def __init__(self, max_kelly_pct: float = 0.10):
+        self.max_kelly_pct = max_kelly_pct
+        self._pnl_history: list[float] = []
+
+    def record_trade(self, pnl: float) -> None:
+        """Record a closed trade's PnL for Kelly calculation."""
+        self._pnl_history.append(pnl)
+
+    def reset(self) -> None:
+        """Clear trade history."""
+        self._pnl_history = []
+
+    @property
+    def trade_count(self) -> int:
+        return len(self._pnl_history)
+
+    def calculate_kelly_pct(self) -> float:
+        """Calculate Kelly percentage from trade history.
+
+        Requires at least 10 trades for meaningful statistics.
+
+        Returns:
+            Kelly fraction (0.0 to max_kelly_pct)
+        """
+        if len(self._pnl_history) < 10:
+            return self.max_kelly_pct  # Use conservative default until enough data
+
+        wins = [p for p in self._pnl_history if p > 0]
+        losses = [p for p in self._pnl_history if p <= 0]
+
+        if not wins or not losses:
+            return self.max_kelly_pct
+
+        win_rate = len(wins) / len(self._pnl_history)
+        avg_win = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+
+        if avg_loss == 0:
+            return self.max_kelly_pct
+
+        odds_ratio = avg_win / avg_loss
+        kelly = calculate_kelly_fraction(win_rate, odds_ratio)
+
+        return max(0.0, min(self.max_kelly_pct, kelly))
+
+    def get_position_size(
+        self,
+        signal: Signal,
+        portfolio_value: float,
+        fallback_risk_pct: float = 0.015,
+    ) -> float:
+        """Calculate position size using Kelly formula.
+
+        Args:
+            signal: Trading signal with direction and price
+            portfolio_value: Current portfolio value
+            fallback_risk_pct: Default risk % if insufficient trade history
+
+        Returns:
+            Position size in base currency units
+        """
+        if signal.direction == SignalDirection.NEUTRAL or signal.price <= 0:
+            return 0.0
+
+        kelly_pct = self.calculate_kelly_pct()
+        position_value = portfolio_value * kelly_pct
+
+        return position_value / signal.price

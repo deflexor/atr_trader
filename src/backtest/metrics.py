@@ -15,6 +15,7 @@ class PerformanceMetrics:
     """Performance metrics calculator for trading strategies."""
 
     max_drawdown: float = 0.0
+    max_drawdown_vs_initial: float = 0.0  # Drawdown relative to initial capital
     sharpe_ratio: float = 0.0
     sortino_ratio: float = 0.0
     calmar_ratio: float = 0.0
@@ -31,6 +32,7 @@ class PerformanceMetrics:
     def reset(self) -> None:
         """Reset all metrics to initial state."""
         self.max_drawdown = 0.0
+        self.max_drawdown_vs_initial = 0.0
         self.sharpe_ratio = 0.0
         self.sortino_ratio = 0.0
         self.calmar_ratio = 0.0
@@ -49,6 +51,7 @@ class PerformanceMetrics:
         trades: list[dict],
         equity_curve: list[dict],
         risk_free_rate: float = 0.02,
+        initial_capital: float = 10000.0,
     ) -> None:
         """Calculate metrics from trade history and equity curve.
 
@@ -56,13 +59,14 @@ class PerformanceMetrics:
             trades: List of trade dictionaries with 'pnl' key
             equity_curve: List of equity curve points [{timestamp, equity}]
             risk_free_rate: Annual risk-free rate for Sharpe calculation
+            initial_capital: Starting capital for vs-initial drawdown calc
 
         """
         if not trades:
             return
 
         # Calculate drawdown from equity curve
-        self._calculate_drawdown(equity_curve)
+        self._calculate_drawdown(equity_curve, initial_capital)
 
         # Calculate trade statistics
         pnls = [t.get("pnl", 0) for t in trades]
@@ -133,13 +137,22 @@ class PerformanceMetrics:
 
         return len(timestamps) / span_years
 
-    def _calculate_drawdown(self, equity_curve: list[dict]) -> None:
-        """Calculate maximum drawdown from equity curve."""
+    def _calculate_drawdown(self, equity_curve: list[dict], initial_capital: float = 10000.0) -> None:
+        """Calculate maximum drawdown from equity curve.
+
+        Calculates two drawdown metrics:
+        - max_drawdown: Peak-to-trough drop as percentage of peak (capped at 100%)
+        - max_drawdown_vs_initial: Peak-to-trough drop as percentage of initial capital
+
+        The peak-based drawdown can exceed 100% when equity grows significantly
+        then drops. Capping at 100% ensures meaningful percentages.
+        """
         if not equity_curve:
             return
 
         peak = equity_curve[0]["equity"] if equity_curve else 0
         max_dd = 0.0
+        max_dd_vs_initial = 0.0
 
         for point in equity_curve:
             equity = point["equity"]
@@ -148,8 +161,13 @@ class PerformanceMetrics:
             drawdown = peak - equity
             if drawdown > max_dd:
                 max_dd = drawdown
+                # Also track vs initial capital at the same point
+                max_dd_vs_initial = drawdown
 
-        self.max_drawdown = max_dd / peak * 100 if peak > 0 else 0.0
+        # Cap at 100% for peak-based (can't lose more than peak)
+        self.max_drawdown = min(max_dd / peak * 100, 100.0) if peak > 0 else 0.0
+        # Track drawdown vs initial capital (can exceed 100% if initial capital was 10k and peak grew to 120k then dropped 110k = 1100% of initial)
+        self.max_drawdown_vs_initial = max_dd_vs_initial / initial_capital * 100 if initial_capital > 0 else 0.0
 
     def _calculate_sharpe(
         self, pnls: list[float], risk_free_rate: float, trades_per_year: float = 252.0
@@ -219,6 +237,7 @@ class PerformanceMetrics:
         """Convert metrics to dictionary."""
         return {
             "max_drawdown": self.max_drawdown,
+            "max_drawdown_vs_initial": self.max_drawdown_vs_initial,
             "sharpe_ratio": self.sharpe_ratio,
             "sortino_ratio": self.sortino_ratio,
             "calmar_ratio": self.calmar_ratio,
@@ -235,7 +254,7 @@ class PerformanceMetrics:
         """String representation of metrics."""
         return (
             f"Sharpe: {self.sharpe_ratio:.2f}, "
-            f"Max DD: {self.max_drawdown:.2f}, "
+            f"Max DD: {self.max_drawdown:.2f}% ({self.max_drawdown_vs_initial:.2f}% vs init), "
             f"Win Rate: {self.win_rate:.1%}, "
             f"Profit Factor: {self.profit_factor:.2f}"
         )

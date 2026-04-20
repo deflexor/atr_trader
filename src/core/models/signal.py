@@ -39,6 +39,7 @@ class Signal:
     features: Optional[dict] = None  # raw features for training
     predicted_outcome: Optional[float] = None  # neural net predicted return
     ml_max_prob: float = 0.0  # LSTM max class probability (0-1), for confidence gating
+    volatility_adjusted_atr_multiplier: Optional[float] = None  # Set by strategy for adaptive trailing stops
 
     @property
     def is_actionable(self) -> bool:

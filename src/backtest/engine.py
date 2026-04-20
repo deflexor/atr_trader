@@ -48,6 +48,12 @@ class BacktestConfig:
     trailing_activation_atr: float = 2.5  # Activate trailing stop when price moves 2.5*ATR
     trailing_distance_atr: float = 2.5  # Trail at 2.5*ATR behind extreme
     max_drawdown_pct: float = 0.05  # Enable 5% drawdown halt to protect capital
+    volatility_adjustment_enabled: bool = True  # Use volatility-adaptive ATR for trailing stops
+    volatility_lookback: int = 20  # Lookback for realized volatility calculation
+    # Geometric (Kelly) position sizing
+    use_geometric_sizing: bool = False  # Kelly criterion sizing (experimental - high drawdown risk)
+    kelly_fraction: float = 0.25  # Use 25% of full Kelly for safety
+    min_kelly_fraction: float = 0.05  # Minimum position size (5% of capital)
 
 
 @dataclass
@@ -59,6 +65,7 @@ class BacktestResult:
     total_return: float
     total_return_pct: float
     max_drawdown: float
+    max_drawdown_vs_initial: float
     sharpe_ratio: float
     win_rate: float
     total_trades: int
@@ -93,6 +100,7 @@ class BacktestEngine:
         self,
         config: Optional[BacktestConfig] = None,
         fill_simulator: Optional[FillSimulator] = None,
+        kelly_sizer=None,  # Optional[KellyPositionSizer] for geometric sizing
     ):
         self.config = config or BacktestConfig()
         self.fill_simulator = fill_simulator or FillSimulator(
@@ -100,6 +108,7 @@ class BacktestEngine:
             slippage_factor=self.config.slippage_factor,
         )
         self.metrics = PerformanceMetrics()
+        self._kelly_sizer = kelly_sizer
 
         # State
         self.capital = 0.0
@@ -112,6 +121,7 @@ class BacktestEngine:
         # Anti-martingale: scale risk by recent win/loss streak
         self._consecutive_losses: int = 0
         self._current_risk_multiplier: float = 1.0  # 1.0=normal, <1 after losses
+        self._last_volatility_multiplier: Optional[float] = None  # From last signal
 
     def reset(self) -> None:
         """Reset backtest state for new run."""
@@ -127,6 +137,9 @@ class BacktestEngine:
         self._current_risk_multiplier = 1.0
         self._drawdown_halted = False
         self._peak_equity = self.config.initial_capital
+        # Reset Kelly sizer for new backtest run
+        if self._kelly_sizer is not None:
+            self._kelly_sizer.reset()
 
     def _calculate_atr(self, candles: CandleSeries, period: int = 14) -> Optional[float]:
         """Calculate Average True Range for dynamic stop sizing."""
@@ -151,6 +164,7 @@ class BacktestEngine:
         candles: CandleSeries,
         signal_generator: Callable[[str, CandleSeries], Signal],
         initial_capital: Optional[float] = None,
+        kelly_sizer=None,  # Optional[KellyPositionSizer] for geometric sizing
     ) -> BacktestResult:
         """Run backtest on historical data.
 
@@ -158,6 +172,7 @@ class BacktestEngine:
             candles: Historical candle data
             signal_generator: Function that generates signals from candles
             initial_capital: Override initial capital
+            kelly_sizer: Optional KellyPositionSizer for geometric position sizing
 
         Returns:
             BacktestResult with performance metrics
@@ -168,6 +183,10 @@ class BacktestEngine:
             self.capital = initial_capital
         else:
             self.capital = self.config.initial_capital
+
+        # Store Kelly sizer for geometric sizing if provided
+        if kelly_sizer is not None:
+            self._kelly_sizer = kelly_sizer
 
         self.start_time = datetime.utcnow()
         logger.info(
@@ -232,7 +251,7 @@ class BacktestEngine:
 
         # Compute performance metrics (Sharpe, drawdown, etc.) from trades + equity curve
         close_trades = [t for t in self.trades if t.get("pnl") is not None]
-        self.metrics.calculate_from_trades(close_trades, self.equity_curve)
+        self.metrics.calculate_from_trades(close_trades, self.equity_curve, initial_capital=self.config.initial_capital)
 
         winning = [t for t in close_trades if t.get("pnl", 0) > 0]
         losing = [t for t in close_trades if t.get("pnl", 0) <= 0]
@@ -247,6 +266,7 @@ class BacktestEngine:
             total_return=total_return,
             total_return_pct=total_return_pct,
             max_drawdown=self.metrics.max_drawdown,
+            max_drawdown_vs_initial=self.metrics.max_drawdown_vs_initial,
             sharpe_ratio=self.metrics.sharpe_ratio,
             win_rate=win_rate,
             total_trades=len(self.trades),  # All trades including entries
@@ -416,7 +436,18 @@ class BacktestEngine:
         # Strong signals (ML agrees) → larger position; weak signals → smaller
         # After losses → smaller position; after wins → larger position
         quantity = signal.quantity
-        if quantity <= 0 and signal.price > 0:
+
+        # Use Kelly-based geometric sizing if enabled and sizer available
+        if (
+            self.config.use_geometric_sizing
+            and self._kelly_sizer is not None
+            and signal.price > 0
+        ):
+            kelly_pct = self._kelly_sizer.calculate_kelly_pct()
+            position_value = self.capital * kelly_pct
+            quantity = position_value / signal.price
+        elif quantity <= 0 and signal.price > 0:
+            # Fallback to arithmetic sizing
             signal_risk = max(signal.strength, 0.3)
             effective_risk = (
                 self.config.risk_per_trade * signal_risk * self._current_risk_multiplier
@@ -484,6 +515,15 @@ class BacktestEngine:
             take_profit=take_profit,
         )
 
+        # Set volatility-adjusted ATR multiplier for trailing stops if provided
+        if (
+            self.config.volatility_adjustment_enabled
+            and signal.volatility_adjusted_atr_multiplier is not None
+            and signal.volatility_adjusted_atr_multiplier > 0
+        ):
+            position.trailing_atr_multiplier = signal.volatility_adjusted_atr_multiplier
+            self._last_volatility_multiplier = signal.volatility_adjusted_atr_multiplier
+
         self.positions.append(position)
 
         # Deduct capital (including commission)
@@ -544,6 +584,10 @@ class BacktestEngine:
         # Update capital: return the position's value minus commission
         entry_value = position.avg_entry_price * position.total_quantity
         self.capital += entry_value + net_pnl
+
+        # Record PnL to Kelly sizer for geometric sizing tracking
+        if self._kelly_sizer is not None:
+            self._kelly_sizer.record_trade(net_pnl)
 
         # Anti-martingale: update streak after close
         if net_pnl > 0:

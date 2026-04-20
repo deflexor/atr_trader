@@ -35,6 +35,7 @@ class Position:
     lowest_price: float = float("inf")  # Track lowest price since entry (for shorts)
     trailing_stop: Optional[float] = None  # Active trailing stop level
     trailing_activated: bool = False  # Whether trailing stop is active
+    trailing_atr_multiplier: float = 2.5  # Per-position ATR multiplier (can vary by volatility)
 
     @property
     def cost_basis(self) -> float:
@@ -100,12 +101,15 @@ class Position:
 
         Activation: price must have moved activation_atr * ATR in our favor.
         Distance: trail at distance_atr * ATR behind the extreme.
+        Uses self.trailing_atr_multiplier if set (from volatility adaptation).
         """
         if atr_value <= 0:
             return
 
-        activation_threshold = activation_atr * atr_value
-        trail_distance = distance_atr * atr_value
+        # Use per-position multiplier if set, otherwise fall back to passed values
+        mult = self.trailing_atr_multiplier if self.trailing_atr_multiplier > 0 else activation_atr
+        activation_threshold = mult * atr_value
+        trail_distance = mult * atr_value
 
         if self.side == "long":
             # Activate when price moved enough above entry

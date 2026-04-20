@@ -22,6 +22,7 @@ from ..core.models.signal import Signal, SignalDirection
 from ..core.models.candle import Candle, CandleSeries
 from ..core.models.market_data import MarketData
 from ..ml.h1_model import H1Model
+from ..ml.forecasting import HoltWintersPredictor, HoltWintersConfig
 
 
 # Preset profiles keyed by quote-agnostic base (e.g. "BTC", "ETH", "DOGE", "TRX")
@@ -135,9 +136,11 @@ def _asset_base(symbol: str) -> str:
 class MomentumConfig(StrategyConfig):
     """Configuration for momentum strategy."""
 
-    # Kelly Criterion sizing
-    kelly_sizing_enabled: bool = False  # Use Kelly formula for position sizing
-    kelly_max_pct: float = 0.10  # 10% cap on Kelly position size
+    # Geometric (Kelly Criterion) position sizing
+    use_geometric_sizing: bool = False  # Use Kelly formula for position sizing
+    kelly_fraction: float = 0.25  # Use 25% of full Kelly for safety (fractional Kelly)
+    min_kelly_fraction: float = 0.05  # Minimum position size (5% of capital)
+    kelly_max_pct: float = 0.20  # 20% cap on Kelly position size
 
     # Best trailing stop from optimization
     trailing_activation_atr: float = 3.0  # Activate when price moves 3.0*ATR
@@ -192,6 +195,16 @@ class MomentumConfig(StrategyConfig):
     regime_high_percentile: float = 0.80  # Above this → conservative
     regime_low_percentile: float = 0.20  # Below this → aggressive
 
+    # Volatility-adaptive trailing stops
+    volatility_adjustment_enabled: bool = True  # Smooth scaling of ATR multipliers based on realized vol
+    use_volatility_forecast: bool = False  # Use Holt-Winters forecast for proactive adjustment (experimental)
+    volatility_forecast_horizon: int = 3  # Periods ahead to forecast
+    volatility_forecast_alpha: float = 0.3  # Holt-Winters alpha (level smoothing)
+    volatility_forecast_beta: float = 0.1  # Holt-Winters beta (trend smoothing)
+    atr_multiplier_high_vol: float = 12.0  # Wider stops in volatile markets
+    atr_multiplier_low_vol: float = 4.0  # Tighter stops in calm markets
+    volatility_lookback: int = 20  # Lookback periods for volatility calculation
+
 
 class MomentumStrategy(BaseStrategy):
     """Trend-following momentum strategy.
@@ -216,7 +229,20 @@ class MomentumStrategy(BaseStrategy):
         self._mtf_symbol: str = ""
         self._mtf_exchange: str = ""
         # Kelly sizing tracker
-        self._kelly_sizer = KellyPositionSizer(max_kelly_pct=self.momentum_config.kelly_max_pct)
+        self._kelly_sizer = KellyPositionSizer(
+            max_kelly_pct=self.momentum_config.kelly_max_pct,
+            kelly_fraction=self.momentum_config.kelly_fraction,
+            min_kelly_fraction=self.momentum_config.min_kelly_fraction,
+        )
+        # Holt-Winters volatility forecaster
+        self._vol_forecaster = HoltWintersPredictor(
+            HoltWintersConfig(
+                alpha=self.momentum_config.volatility_forecast_alpha,
+                beta=self.momentum_config.volatility_forecast_beta,
+                horizon=self.momentum_config.volatility_forecast_horizon,
+            )
+        )
+        self._vol_history: list[float] = []
         # Diagnostics: count signals at each filter stage
         self.diagnostics: dict[str, int] = {
             "total_evaluated": 0,
@@ -643,6 +669,102 @@ class MomentumStrategy(BaseStrategy):
         atr_pct = atr / current_price
         return atr_pct >= atr_threshold_pct
 
+    def calculate_volatility_adjusted_atr_multiplier(
+        self,
+        candles: CandleSeries,
+        base_multiplier: float,
+    ) -> float:
+        """Calculate volatility-adjusted ATR multiplier for trailing stops.
+
+        Uses smooth scaling based on vol_ratio = current_vol / avg_vol:
+        - vol_ratio > 1 → higher volatility → wider stops (higher multiplier)
+        - vol_ratio < 1 → lower volatility → tighter stops (lower multiplier)
+
+        Formula: scale_factor = clamp(0.5 + 0.5 * vol_ratio, 0.6, 1.4)
+        This gives multiplier range of 0.6x to 1.4x of base.
+
+        When use_volatility_forecast=True, uses Holt-Winters to forecast
+        volatility and adjust proactively.
+
+        Args:
+            candles: Candle series
+            base_multiplier: Base trailing activation ATR multiplier
+
+        Returns:
+            Adjusted ATR multiplier for trailing stop activation
+        """
+        if not self.momentum_config.volatility_adjustment_enabled:
+            return base_multiplier
+
+        lookback = self.momentum_config.volatility_lookback
+        if len(candles.candles) < lookback + 14:
+            return base_multiplier
+
+        # Calculate current ATR as % of price
+        atr = self._calculate_atr(candles, period=14)
+        if not atr or atr <= 0:
+            return base_multiplier
+
+        current_price = candles.candles[-1].close
+        if current_price <= 0:
+            return base_multiplier
+
+        current_vol_pct = atr / current_price
+
+        # Update volatility history and forecaster
+        self._vol_history.append(current_vol_pct)
+        if len(self._vol_history) > lookback * 2:
+            self._vol_history = self._vol_history[-lookback * 2:]
+
+        # If using forecasting, fit and forecast
+        forecasted_vol_pct = current_vol_pct
+        if self.momentum_config.use_volatility_forecast and len(self._vol_history) >= 20:
+            try:
+                self._vol_forecaster.fit(self._vol_history)
+                forecasted = self._vol_forecaster.forecast(self.momentum_config.volatility_forecast_horizon)
+                if forecasted:
+                    # Use the forecasted volatility (average of horizon steps)
+                    forecasted_vol_pct = sum(forecasted) / len(forecasted)
+            except Exception:
+                pass  # Fall back to current volatility
+
+        # Calculate historical average ATR% over lookback
+        hist_vol_pcts = []
+        for i in range(14, len(candles.candles) - 1):
+            window = CandleSeries(
+                candles=candles.candles[i - 14 : i + 1],
+                symbol=candles.symbol,
+                exchange=candles.exchange,
+                timeframe=candles.timeframe,
+            )
+            hist_atr = self._calculate_atr(window, period=14)
+            if hist_atr and hist_atr > 0:
+                price = candles.candles[i].close
+                if price > 0:
+                    hist_vol_pcts.append(hist_atr / price)
+
+        if len(hist_vol_pcts) < lookback // 2:
+            return base_multiplier
+
+        # Use recent lookback period for historical average
+        recent_vol_pcts = hist_vol_pcts[-lookback:]
+        avg_vol_pct = sum(recent_vol_pcts) / len(recent_vol_pcts)
+
+        if avg_vol_pct <= 0:
+            return base_multiplier
+
+        # Use forecasted volatility if enabled, otherwise current
+        vol_pct_for_calc = forecasted_vol_pct if self.momentum_config.use_volatility_forecast else current_vol_pct
+
+        # Smooth scaling: vol_ratio determines how much to scale
+        vol_ratio = vol_pct_for_calc / avg_vol_pct
+
+        # Scale factor: ranges from ~0.6 (low vol) to ~1.4 (high vol)
+        scale_factor = 0.5 + 0.5 * vol_ratio
+        scale_factor = max(0.6, min(1.4, scale_factor))  # clamp to [0.6, 1.4]
+
+        return base_multiplier * scale_factor
+
     def _check_mtf_trend(
         self,
         candles: CandleSeries,
@@ -1012,6 +1134,15 @@ class MomentumStrategy(BaseStrategy):
             entry_level = self._previous_candle_level(candles, is_long)
             if entry_level is not None:
                 signal.features = {"entry_level": entry_level}
+
+            # Calculate volatility-adjusted ATR multiplier for trailing stops
+            if self.momentum_config.volatility_adjustment_enabled:
+                adjusted_mult = self.calculate_volatility_adjusted_atr_multiplier(
+                    candles,
+                    self.momentum_config.trailing_activation_atr,
+                )
+                signal.volatility_adjusted_atr_multiplier = adjusted_mult
+
             self.diagnostics["signals_produced"] += 1
 
         return signal
@@ -1024,6 +1155,9 @@ class MomentumStrategy(BaseStrategy):
     ) -> float:
         """Calculate position size based on risk management or Kelly Criterion.
 
+        When use_geometric_sizing=True, uses Kelly criterion which optimizes
+        for compound growth by sizing positions based on win rate and avg win/loss ratio.
+
         Args:
             signal: Trading signal with direction and price
             portfolio_value: Current portfolio value
@@ -1035,14 +1169,17 @@ class MomentumStrategy(BaseStrategy):
         if signal.direction == SignalDirection.NEUTRAL:
             return 0.0
 
-        if self.momentum_config.kelly_sizing_enabled:
+        if self.momentum_config.use_geometric_sizing:
             kelly_pct = self._kelly_sizer.calculate_kelly_pct()
-            effective_risk = kelly_pct * signal.strength if signal.strength > 0 else kelly_pct
-            position_value = portfolio_value * effective_risk
+            # Kelly already incorporates edge (win rate * odds) - use full Kelly pct
+            # regardless of signal strength, since strength is already baked into
+            # the Kelly calculation via trade history
+            position_value = portfolio_value * kelly_pct
             if signal.price > 0:
                 return position_value / signal.price
             return 0.0
 
+        # Arithmetic (fixed %) sizing - legacy behavior
         risk_amount = portfolio_value * risk_per_trade
         adjusted_risk = risk_amount * signal.strength
 
@@ -1070,7 +1207,7 @@ def calculate_kelly_fraction(win_rate: float, avg_win_loss_ratio: float) -> floa
         avg_win_loss_ratio: Ratio of average win to average loss (e.g., 2.0 = twice as big as loss)
 
     Returns:
-        Kelly percentage capped at 10% for safety
+        Kelly fraction (unbounded, caller applies fraction + clamps)
     """
     if avg_win_loss_ratio <= 0 or win_rate < 0 or win_rate > 1:
         return 0.0
@@ -1082,18 +1219,29 @@ def calculate_kelly_fraction(win_rate: float, avg_win_loss_ratio: float) -> floa
     # Kelly formula: (b * p - q) / b
     kelly = (b * p - q) / b
 
-    # Cap at 10% maximum (practical safety limit)
-    return max(0.0, min(0.10, kelly))
+    return kelly
 
 
 class KellyPositionSizer:
     """Tracks trade history and calculates Kelly-based position sizes.
 
     Pure implementation - no side effects, thread-safe.
+
+    Uses fractional Kelly with safety bounds:
+    - kelly_fraction: multiplier on full Kelly (0.25 = "half-Kelly")
+    - min_kelly_fraction: floor on position size
+    - max_kelly_fraction: ceiling on position size (default 0.20 = 20%)
     """
 
-    def __init__(self, max_kelly_pct: float = 0.10):
+    def __init__(
+        self,
+        max_kelly_pct: float = 0.20,
+        kelly_fraction: float = 0.25,
+        min_kelly_fraction: float = 0.05,
+    ):
         self.max_kelly_pct = max_kelly_pct
+        self.kelly_fraction = kelly_fraction
+        self.min_kelly_fraction = min_kelly_fraction
         self._pnl_history: list[float] = []
 
     def record_trade(self, pnl: float) -> None:
@@ -1112,9 +1260,10 @@ class KellyPositionSizer:
         """Calculate Kelly percentage from trade history.
 
         Requires at least 10 trades for meaningful statistics.
+        Applies fractional Kelly with safety bounds.
 
         Returns:
-            Kelly fraction (0.0 to max_kelly_pct)
+            Kelly fraction clamped between min_kelly_fraction and max_kelly_pct
         """
         if len(self._pnl_history) < 10:
             return self.max_kelly_pct  # Use conservative default until enough data
@@ -1135,7 +1284,13 @@ class KellyPositionSizer:
         odds_ratio = avg_win / avg_loss
         kelly = calculate_kelly_fraction(win_rate, odds_ratio)
 
-        return max(0.0, min(self.max_kelly_pct, kelly))
+        # Apply fractional Kelly (e.g., 0.25 = "half-Kelly" for safety)
+        kelly = kelly * self.kelly_fraction
+
+        # Clamp between min and max
+        kelly = max(self.min_kelly_fraction, min(self.max_kelly_pct, kelly))
+
+        return kelly
 
     def get_position_size(
         self,

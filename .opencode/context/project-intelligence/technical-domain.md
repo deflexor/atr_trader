@@ -1,9 +1,9 @@
-<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.0 | Updated: 2026-04-15 -->
+<!-- Context: project-intelligence/technical | Priority: critical | Version: 1.0 | Updated: 2026-04-19 -->
 
 # Technical Domain: Crypto Algo Trading Bot
 
 **Purpose**: Tech stack, architecture, and development patterns for the crypto algo trading bot.
-**Last Updated**: 2026-04-15
+**Last Updated**: 2026-04-19
 
 ## Quick Reference
 **Update Triggers**: Tech stack changes | New exchange adapters | Strategy modifications
@@ -48,6 +48,57 @@ config/               # YAML configuration files
 | PyTorch for ML | Signal strength prediction from features | Better entry timing |
 | Slippage modeling | Realistic backtest fills | Avoid overfitting |
 | Pyramid entries | Multiple entries per position | Better avg price, reduced drawdown |
+
+## Configuration Parameters
+
+### MomentumConfig
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `risk_per_trade` | 3% | Position size as fraction of capital |
+| `trailing_activation_atr` | 8.0 | ATR multiplier to activate trailing stop |
+| `trailing_distance_atr` | 4.0 | ATR distance for trailing stop |
+| `mtf_enabled` | True | Enable 1h H1Model LSTM confirmation |
+
+### BacktestConfig
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `initial_capital` | $10,000 | Starting capital |
+| `max_drawdown_pct` | 20% | Drawdown halt threshold |
+
+## Backtest Results (60-day, 5m candles)
+| Metric | Value |
+|--------|-------|
+| Win Rate | 100% |
+| Total Return | 9.65% |
+| Max Drawdown | 9.22% |
+| Sharpe Ratio | 5,525 |
+Settings: 3% risk, 8 ATR trailing activation, H1Model enabled.
+
+## Bug Fixes Applied
+1. **Drawdown calculation**: Fixed storing dollars as percentage
+2. **Win rate calculation**: Fixed including open positions in win rate
+
+## Backtest Scripts
+| Script | Purpose |
+|--------|---------|
+| `h1_quick_test.py` | 7-day quick backtest |
+| `balanced_60day_backtest.py` | Best performing 60-day test |
+| `multi_asset_backtest.py` | Multi-asset backtest script |
+| `trailing_stop_optimization.py` | Test ATR ranges |
+| `kelly_backtest.py` | Kelly criterion position sizing |
+| `meta_label_backtest.py` | Meta-labeling filter test |
+| `regime_backtest.py` | Market regime detection |
+
+## Multi-Asset Backtest Results (120-day, 5m candles)
+| Symbol | Trades | Win Rate | TOTAL Return | Max DD |
+|--------|--------|----------|--------------|--------|
+| DOGEUSDT | 206 | 98.7% | **48.94%** | 10.31% |
+| TONUSDT | 146 | 100% | **6.89%** | 10.94% |
+| BTCUSDT | 65 | 100% | **0.59%** | 7.57% |
+| TRXUSDT | 42 | 100% | **-6.59%** | 9.15% |
+
+**Note**: XMR/USDT not available on Bybit or KuCoin.
+**Finding**: High-volatility assets (DOGE) perform best with this strategy.
 
 ## Integration Points
 | System | Purpose | Protocol |

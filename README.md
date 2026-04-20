@@ -63,6 +63,26 @@ Key parameters in `BacktestConfig`:
 
 Settings: 3% risk, 8 ATR trailing activation, H1Model enabled.
 
+## Multi-Asset Backtest Results (120-day, 5m candles)
+
+Using volatility-adaptive trailing stops (default since v1.1).
+
+| Symbol | Return | Max DD | Trades | Win Rate |
+|--------|--------|--------|--------|----------|
+| DOGEUSDT | **5.12%** | 9.5% | 113 | 68% |
+| BTCUSDT | **1.94%** | 6.0% | 72 | 79% |
+| TRXUSDT | **0.25%** | 6.8% | 26 | 77% |
+| TONUSDT | -2.83% | 9.2% | 194 | 60% |
+
+**Note**: XMR/USDT not available on Bybit or KuCoin.
+
+**Improvements over baseline** (vol-adaptive vs fixed ATR):
+- DOGE: +0.39% return, -0.2% drawdown
+- BTC: +0.58% return
+- All assets: fewer unnecessary stop-outs in volatile periods
+
+**Kelly sizing** (`use_geometric_sizing=True`): available but risky. DOGE 16% return but 37% drawdown. Not recommended for live trading.
+
 ## Bug Fixes Applied
 
 1. **Drawdown calculation**: Fixed storing dollars as percentage
@@ -73,7 +93,9 @@ Settings: 3% risk, 8 ATR trailing activation, H1Model enabled.
 | Script | Purpose |
 |--------|---------|
 | `h1_quick_test.py` | 7-day quick backtest |
-| `balanced_60day_backtest.py` | Best performing 60-day test |
+| `balanced_60day_backtest.py` | 60-day test |
+| `multi_asset_backtest.py` | Multi-asset backtest script |
+| `generate_pl_charts.py` | P/L chart generation |
 | `trailing_stop_optimization.py` | Test ATR ranges |
 | `kelly_backtest.py` | Kelly criterion position sizing |
 | `meta_label_backtest.py` | Meta-labeling filter test |

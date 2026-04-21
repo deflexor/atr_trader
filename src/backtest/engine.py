@@ -16,6 +16,11 @@ from ..core.models.order import Order, OrderStatus, OrderSide, OrderType
 from ..core.models.position import Position
 from .fills import FillSimulator
 from .metrics import PerformanceMetrics
+from ..risk.regime_detector import RegimeDetector, MarketRegime, RegimeResult
+from ..risk.pre_trade_filter import PreTradeDrawdownFilter, TradeVerdict
+from ..risk.boltzmann_sizer import BoltzmannPositionSizer, BoltzmannConfig
+from ..risk.bootstrap_stops import BootstrapStopCalculator
+from ..risk.drawdown_budget import DrawdownBudgetTracker, DrawdownBudgetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,16 @@ class BacktestConfig:
     use_geometric_sizing: bool = False  # Kelly criterion sizing (experimental - high drawdown risk)
     kelly_fraction: float = 0.25  # Use 25% of full Kelly for safety
     min_kelly_fraction: float = 0.05  # Minimum position size (5% of capital)
+
+    # Zero-drawdown risk layer
+    use_zero_drawdown_layer: bool = True  # Enable regime detection + budget tracking + Boltzmann sizing
+    regime_lookback: int = 100  # Lookback for GMM regime feature extraction
+    boltzmann_temperature: float = 0.3  # Boltzmann thermal weighting sensitivity
+    bootstrap_stops_enabled: bool = True  # Use bootstrap-validated stop distances
+    bootstrap_confidence: float = 0.95  # Confidence level for worst-case stop
+    bootstrap_simulations: int = 1000  # Number of bootstrap resamples
+    per_trade_drawdown_budget: float = 0.01  # 1% max drawdown per trade
+    total_drawdown_budget: float = 0.03  # 3% total drawdown budget per session
 
 
 @dataclass
@@ -123,6 +138,48 @@ class BacktestEngine:
         self._current_risk_multiplier: float = 1.0  # 1.0=normal, <1 after losses
         self._last_volatility_multiplier: Optional[float] = None  # From last signal
 
+        # Zero-drawdown risk layer
+        self._regime_detector: Optional[RegimeDetector] = None
+        self._pre_trade_filter: Optional[PreTradeDrawdownFilter] = None
+        self._boltzmann_sizer: Optional[BoltzmannPositionSizer] = None
+        self._bootstrap_stops: Optional[BootstrapStopCalculator] = None
+        self._budget_tracker: Optional[DrawdownBudgetTracker] = None
+        self._last_regime_result: Optional[RegimeResult] = None
+        self._risk_filter_stats: dict[str, int] = {}  # Diagnostics
+        if self.config.use_zero_drawdown_layer:
+            self._init_risk_layer()
+
+    def _init_risk_layer(self) -> None:
+        """Initialize zero-drawdown risk management components."""
+        cfg = self.config
+        self._regime_detector = RegimeDetector(lookback=cfg.regime_lookback)
+        self._budget_tracker = DrawdownBudgetTracker(
+            config=DrawdownBudgetConfig(
+                total_budget_pct=cfg.total_drawdown_budget,
+                per_trade_budget_pct=cfg.per_trade_drawdown_budget,
+            ),
+            initial_capital=cfg.initial_capital,
+        )
+        self._pre_trade_filter = PreTradeDrawdownFilter(
+            budget_tracker=self._budget_tracker,
+            max_per_trade_dd_pct=cfg.per_trade_drawdown_budget,
+        )
+        self._boltzmann_sizer = BoltzmannPositionSizer(
+            config=BoltzmannConfig(temperature=cfg.boltzmann_temperature),
+        )
+        if cfg.bootstrap_stops_enabled:
+            self._bootstrap_stops = BootstrapStopCalculator(
+                confidence_level=cfg.bootstrap_confidence,
+                n_simulations=cfg.bootstrap_simulations,
+            )
+        self._risk_filter_stats = {
+            "regime_rejected": 0,
+            "budget_rejected": 0,
+            "worst_case_rejected": 0,
+            "boltzmann_reduced": 0,
+            "bootstrap_stop_overrides": 0,
+        }
+
     def reset(self) -> None:
         """Reset backtest state for new run."""
         self.capital = self.config.initial_capital
@@ -137,9 +194,19 @@ class BacktestEngine:
         self._current_risk_multiplier = 1.0
         self._drawdown_halted = False
         self._peak_equity = self.config.initial_capital
+        self._last_regime_result = None
         # Reset Kelly sizer for new backtest run
         if self._kelly_sizer is not None:
             self._kelly_sizer.reset()
+        # Reset risk layer
+        if self._budget_tracker is not None:
+            self._budget_tracker.reset(initial_capital=self.config.initial_capital)
+        if self._regime_detector is not None:
+            self._regime_detector.reset()
+        if self._bootstrap_stops is not None:
+            self._bootstrap_stops.reset()
+        for key in self._risk_filter_stats:
+            self._risk_filter_stats[key] = 0
 
     def _calculate_atr(self, candles: CandleSeries, period: int = 14) -> Optional[float]:
         """Calculate Average True Range for dynamic stop sizing."""
@@ -215,14 +282,40 @@ class BacktestEngine:
             if signal.is_actionable and signal.direction != SignalDirection.NEUTRAL:
                 in_cooldown = (i - self._last_trade_candle) < self.config.cooldown_candles
                 halted_by_drawdown = self._drawdown_halted
+                # Also check budget tracker halt
+                if self._budget_tracker is not None and self._budget_tracker.is_halted:
+                    halted_by_drawdown = True
                 if not in_cooldown and not halted_by_drawdown:
-                    self._process_signal(signal, candle, visible_candles)
-                    if self.positions and self.positions[-1].strategy_id:
-                        self._last_trade_candle = i
+                    # Apply zero-drawdown risk layer if enabled
+                    if self.config.use_zero_drawdown_layer and self._last_regime_result is not None:
+                        signal = self._apply_risk_layer(signal, candle, visible_candles, i)
+                    if signal.direction != SignalDirection.NEUTRAL:
+                        self._process_signal(signal, candle, visible_candles)
+                        if self.positions and self.positions[-1].strategy_id:
+                            self._last_trade_candle = i
 
             # Record equity
             equity = self._calculate_equity(candle.close)
             self._peak_equity = max(self._peak_equity, equity)
+
+            # Update regime detector with candle return
+            if self._regime_detector is not None and i > 0:
+                prev_close = candles.candles[i - 1].close
+                if prev_close > 0:
+                    ret = (candle.close - prev_close) / prev_close
+                    self._regime_detector.update(ret)
+                    self._last_regime_result = self._regime_detector.detect()
+
+            # Update budget tracker
+            if self._budget_tracker is not None:
+                self._budget_tracker.update_equity(equity, i)
+
+            # Update bootstrap stops with return
+            if self._bootstrap_stops is not None and i > 0:
+                prev_close = candles.candles[i - 1].close
+                if prev_close > 0:
+                    ret = (candle.close - prev_close) / prev_close
+                    self._bootstrap_stops.update(ret)
 
             # Check drawdown halt
             if self.config.max_drawdown_pct > 0 and self._peak_equity > 0:
@@ -352,6 +445,85 @@ class BacktestEngine:
                         self._close_position(
                             position, position.trailing_stop, candle.volume, "trailing_stop"
                         )
+
+    def _apply_risk_layer(
+        self,
+        signal: Signal,
+        candle: Candle,
+        visible_candles: Optional[CandleSeries],
+        candle_idx: int,
+    ) -> Signal:
+        """Apply zero-drawdown risk layer to a trading signal.
+
+        Steps:
+        1. Attach regime metadata to signal
+        2. Pre-trade filter: reject if drawdown budget exceeded or regime is CRASH
+        3. Boltzmann sizing: reduce position size by regime uncertainty
+        4. Bootstrap stops: override stop distance with bootstrapped worst-case
+
+        Returns modified signal (direction may become NEUTRAL if rejected).
+        """
+        if self._last_regime_result is None:
+            return signal
+
+        regime = self._last_regime_result
+
+        # 1. Attach regime metadata
+        signal.regime = regime.regime.value
+
+        # 2. Pre-trade drawdown filter
+        if self._pre_trade_filter is not None and signal.price > 0:
+            atr = self._calculate_atr(visible_candles, self.config.atr_period) if visible_candles else None
+            atr_pct = (atr / signal.price) if atr and signal.price > 0 else 0.01
+            position_value = self.capital * self.config.risk_per_trade * max(signal.strength, 0.3)
+
+            evaluation = self._pre_trade_filter.evaluate(
+                regime_result=regime,
+                position_value=position_value,
+                capital=self.capital,
+                atr_pct=atr_pct,
+            )
+            signal.risk_verdict = evaluation.verdict.value
+
+            if evaluation.verdict != TradeVerdict.APPROVED:
+                # Neutralize the signal
+                stat_key = {
+                    TradeVerdict.REJECTED_REGIME: "regime_rejected",
+                    TradeVerdict.REJECTED_BUDGET: "budget_rejected",
+                    TradeVerdict.REJECTED_WORST_CASE: "worst_case_rejected",
+                }.get(evaluation.verdict, "regime_rejected")
+                self._risk_filter_stats[stat_key] += 1
+                logger.debug(
+                    f"Risk filter rejected: {evaluation.verdict.value} "
+                    f"regime={regime.regime.value} reason={evaluation.reason}"
+                )
+                return Signal(
+                    symbol=signal.symbol,
+                    exchange=signal.exchange,
+                    direction=SignalDirection.NEUTRAL,
+                    strength=0.0,
+                    confidence=0.0,
+                    price=signal.price,
+                    strategy_id=signal.strategy_id,
+                    regime=regime.regime.value,
+                    risk_verdict=evaluation.verdict.value,
+                )
+
+        # 3. Boltzmann position sizing
+        if self._boltzmann_sizer is not None:
+            size_fraction = self._boltzmann_sizer.calculate_size_fraction(regime)
+            if size_fraction < 1.0:
+                signal.quantity *= size_fraction
+                self._risk_filter_stats["boltzmann_reduced"] += 1
+
+        # 4. Bootstrap stop override
+        if self._bootstrap_stops is not None and len(self._bootstrap_stops._returns) >= 30:
+            stop_result = self._bootstrap_stops.calculate()
+            if stop_result.stop_distance_pct > 0:
+                signal.bootstrap_stop_pct = stop_result.stop_distance_pct
+                self._risk_filter_stats["bootstrap_stop_overrides"] += 1
+
+        return signal
 
     def _process_signal(
         self,
@@ -588,6 +760,10 @@ class BacktestEngine:
         # Record PnL to Kelly sizer for geometric sizing tracking
         if self._kelly_sizer is not None:
             self._kelly_sizer.record_trade(net_pnl)
+
+        # Record PnL to drawdown budget tracker
+        if self._budget_tracker is not None:
+            self._budget_tracker.record_trade_pnl(net_pnl)
 
         # Anti-martingale: update streak after close
         if net_pnl > 0:

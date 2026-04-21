@@ -61,6 +61,16 @@ class RiskConfig:
     take_profit: float = 0.02
     max_drawdown: float = 0.05
 
+    # Zero-drawdown risk layer
+    regime_detection: bool = True  # Enable GMM regime detection
+    regime_lookback: int = 100  # Lookback for regime feature extraction
+    boltzmann_temperature: float = 0.3  # Boltzmann thermal weighting sensitivity
+    bootstrap_stops: bool = True  # Enable bootstrap stop calculation
+    bootstrap_confidence: float = 0.95  # Confidence level for worst-case
+    bootstrap_simulations: int = 1000  # Number of bootstrap resamples
+    per_trade_drawdown_budget: float = 0.01  # 1% max drawdown per trade
+    total_drawdown_budget: float = 0.03  # 3% total drawdown budget per session
+
 
 @dataclass
 class StrategyConfig:

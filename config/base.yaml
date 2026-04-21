@@ -29,6 +29,15 @@ risk:
   stop_loss: 0.01
   take_profit: 0.02
   max_drawdown: 0.05
+  # Zero-drawdown risk layer
+  regime_detection: true
+  regime_lookback: 100
+  boltzmann_temperature: 0.3
+  bootstrap_stops: true
+  bootstrap_confidence: 0.95
+  bootstrap_simulations: 1000
+  per_trade_drawdown_budget: 0.01
+  total_drawdown_budget: 0.03
 
 strategy:
   pyramid_entries: 2

@@ -40,6 +40,9 @@ class Signal:
     predicted_outcome: Optional[float] = None  # neural net predicted return
     ml_max_prob: float = 0.0  # LSTM max class probability (0-1), for confidence gating
     volatility_adjusted_atr_multiplier: Optional[float] = None  # Set by strategy for adaptive trailing stops
+    regime: Optional[str] = None  # Market regime from RegimeDetector (e.g. "CALM_TRENDING")
+    risk_verdict: Optional[str] = None  # Pre-trade filter verdict (e.g. "APPROVED", "REJECTED_REGIME")
+    bootstrap_stop_pct: Optional[float] = None  # Stop distance from BootstrapStopCalculator
 
     @property
     def is_actionable(self) -> bool:

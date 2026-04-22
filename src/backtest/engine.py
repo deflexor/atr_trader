@@ -67,6 +67,9 @@ class BacktestConfig:
     bootstrap_stops_enabled: bool = True  # Use bootstrap-validated stop distances
     bootstrap_confidence: float = 0.95  # Confidence level for worst-case stop
     bootstrap_simulations: int = 1000  # Number of bootstrap resamples
+    bootstrap_horizon: int = 40  # Forward periods to simulate (longer = wider stops)
+    bootstrap_min_stop_pct: float = 0.005  # Minimum bootstrap stop (0.5%)
+    bootstrap_max_stop_pct: float = 0.10  # Maximum bootstrap stop (10%)
     per_trade_drawdown_budget: float = 0.01  # 1% max drawdown per trade
     total_drawdown_budget: float = 0.03  # 3% total drawdown budget per session
 
@@ -171,6 +174,9 @@ class BacktestEngine:
             self._bootstrap_stops = BootstrapStopCalculator(
                 confidence_level=cfg.bootstrap_confidence,
                 n_simulations=cfg.bootstrap_simulations,
+                horizon=cfg.bootstrap_horizon,
+                min_stop_pct=cfg.bootstrap_min_stop_pct,
+                max_stop_pct=cfg.bootstrap_max_stop_pct,
             )
         self._risk_filter_stats = {
             "regime_rejected": 0,
@@ -435,16 +441,37 @@ class BacktestEngine:
             if self.config.use_trailing_stop:
                 atr = self._calculate_atr(visible_candles, self.config.atr_period)
                 if atr and atr > 0:
-                    position.update_trailing_stop(
-                        self.config.trailing_activation_atr,
-                        self.config.trailing_distance_atr,
-                        atr,
-                    )
+                    act_atr, dist_atr = self._get_trailing_params()
+                    position.update_trailing_stop(act_atr, dist_atr, atr)
                     # Check if trailing stop is now triggered
                     if position.is_trailing_triggered():
                         self._close_position(
                             position, position.trailing_stop, candle.volume, "trailing_stop"
                         )
+
+    # Regime-adaptive trailing stop parameters
+    # Tighter in uncertain regimes, wider in calm trending
+    _REGIME_TRAILING_MAP: dict[MarketRegime, tuple[float, float]] = {
+        MarketRegime.CALM_TRENDING: (8.0, 4.0),      # Wide: let winners run
+        MarketRegime.VOLATILE_TRENDING: (4.0, 2.0),   # Tighter: lock in profits faster
+        MarketRegime.MEAN_REVERTING: (3.0, 1.5),      # Tight: expect quick reversals
+        MarketRegime.CRASH: (1.5, 0.8),               # Very tight: protect capital
+    }
+
+    def _get_trailing_params(self) -> tuple[float, float]:
+        """Get trailing stop ATR multipliers adapted to current regime.
+
+        Returns (activation_atr, distance_atr).
+        Falls back to config defaults if no regime detected.
+        """
+        if not self._last_regime_result or not self.config.use_zero_drawdown_layer:
+            return self.config.trailing_activation_atr, self.config.trailing_distance_atr
+
+        params = self._REGIME_TRAILING_MAP.get(
+            self._last_regime_result.regime,
+            (self.config.trailing_activation_atr, self.config.trailing_distance_atr),
+        )
+        return params
 
     def _apply_risk_layer(
         self,
@@ -663,6 +690,17 @@ class BacktestEngine:
         elif self.config.use_trailing_stop:
             stop_loss = None  # Trailing stop only — no fixed SL
             take_profit = None  # Trailing stop only — no fixed TP
+            # Zero-DD layer: add bootstrap-based hard stop loss as safety net
+            if (
+                self.config.use_zero_drawdown_layer
+                and signal.bootstrap_stop_pct is not None
+                and signal.bootstrap_stop_pct > 0
+            ):
+                sl_distance = fill_price * signal.bootstrap_stop_pct
+                if is_long:
+                    stop_loss = fill_price - sl_distance
+                else:
+                    stop_loss = fill_price + sl_distance
         else:
             sl_distance = fill_price * self.config.stop_loss_pct
             tp_distance = fill_price * self.config.take_profit_pct

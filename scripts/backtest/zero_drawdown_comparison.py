@@ -161,12 +161,7 @@ async def main():
         use_zero_drawdown_layer=True,
         regime_lookback=100,
         boltzmann_temperature=0.5,
-        bootstrap_stops_enabled=True,
-        bootstrap_confidence=0.99,
-        bootstrap_simulations=500,
-        bootstrap_horizon=60,  # 60 * 5min = 5 hours forward
-        bootstrap_min_stop_pct=0.01,  # Minimum 1% stop
-        bootstrap_max_stop_pct=0.08,  # Maximum 8% stop
+        bootstrap_stops_enabled=False,  # OFF: bootstrap hard SL kills win rate
         per_trade_drawdown_budget=0.05,
         total_drawdown_budget=0.20,
     )

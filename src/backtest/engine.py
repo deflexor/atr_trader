@@ -183,7 +183,7 @@ class BacktestEngine:
             "budget_rejected": 0,
             "worst_case_rejected": 0,
             "boltzmann_reduced": 0,
-            "bootstrap_stop_overrides": 0,
+            "vol_spike_reduced": 0,
         }
 
     def reset(self) -> None:
@@ -450,12 +450,12 @@ class BacktestEngine:
                         )
 
     # Regime-adaptive trailing stop parameters
-    # Tighter in uncertain regimes, wider in calm trending
+    # Only tighten during CRASH — other regimes keep wide trailing for profitability
     _REGIME_TRAILING_MAP: dict[MarketRegime, tuple[float, float]] = {
         MarketRegime.CALM_TRENDING: (8.0, 4.0),      # Wide: let winners run
-        MarketRegime.VOLATILE_TRENDING: (4.0, 2.0),   # Tighter: lock in profits faster
-        MarketRegime.MEAN_REVERTING: (3.0, 1.5),      # Tight: expect quick reversals
-        MarketRegime.CRASH: (1.5, 0.8),               # Very tight: protect capital
+        MarketRegime.VOLATILE_TRENDING: (6.0, 3.0),   # Slightly tighter
+        MarketRegime.MEAN_REVERTING: (8.0, 4.0),      # Keep wide: this is 89% of the time
+        MarketRegime.CRASH: (2.0, 1.0),               # Tight: protect capital urgently
     }
 
     def _get_trailing_params(self) -> tuple[float, float]:
@@ -485,13 +485,95 @@ class BacktestEngine:
         Steps:
         1. Attach regime metadata to signal
         2. Pre-trade filter: reject if drawdown budget exceeded or regime is CRASH
-        3. Boltzmann sizing: reduce position size by regime uncertainty
-        4. Bootstrap stops: override stop distance with bootstrapped worst-case
+        3. Boltzmann sizing: reduce position size by regime confidence
+        4. Volatility spike detection: reduce size when vol is spiking
 
         Returns modified signal (direction may become NEUTRAL if rejected).
         """
         if self._last_regime_result is None:
             return signal
+
+        regime = self._last_regime_result
+
+        # 1. Attach regime metadata
+        signal.regime = regime.regime.value
+
+        # 2. Pre-trade drawdown filter
+        if self._pre_trade_filter is not None and signal.price > 0:
+            atr = self._calculate_atr(visible_candles, self.config.atr_period) if visible_candles else None
+            atr_pct = (atr / signal.price) if atr and signal.price > 0 else 0.01
+            position_value = self.capital * self.config.risk_per_trade * max(signal.strength, 0.3)
+
+            evaluation = self._pre_trade_filter.evaluate(
+                regime_result=regime,
+                position_value=position_value,
+                capital=self.capital,
+                atr_pct=atr_pct,
+            )
+            signal.risk_verdict = evaluation.verdict.value
+
+            if evaluation.verdict != TradeVerdict.APPROVED:
+                stat_key = {
+                    TradeVerdict.REJECTED_REGIME: "regime_rejected",
+                    TradeVerdict.REJECTED_BUDGET: "budget_rejected",
+                    TradeVerdict.REJECTED_WORST_CASE: "worst_case_rejected",
+                }.get(evaluation.verdict, "regime_rejected")
+                self._risk_filter_stats[stat_key] += 1
+                logger.debug(
+                    f"Risk filter rejected: {evaluation.verdict.value} "
+                    f"regime={regime.regime.value} reason={evaluation.reason}"
+                )
+                return Signal(
+                    symbol=signal.symbol,
+                    exchange=signal.exchange,
+                    direction=SignalDirection.NEUTRAL,
+                    strength=0.0,
+                    confidence=0.0,
+                    price=signal.price,
+                    strategy_id=signal.strategy_id,
+                    regime=regime.regime.value,
+                    risk_verdict=evaluation.verdict.value,
+                )
+
+        # 3. Boltzmann position sizing (regime-based)
+        if self._boltzmann_sizer is not None:
+            size_fraction = self._boltzmann_sizer.calculate_size_fraction(regime)
+            if size_fraction < 1.0:
+                signal.quantity *= size_fraction
+                self._risk_filter_stats["boltzmann_reduced"] += 1
+
+        # 4. Volatility spike detection: detect rising volatility in real-time
+        #    If current ATR is significantly above recent average, reduce position
+        if visible_candles and signal.price > 0:
+            atr = self._calculate_atr(visible_candles, self.config.atr_period)
+            if atr and atr > 0:
+                current_atr_pct = atr / signal.price
+                # Compare to recent 100-candle average ATR%
+                if len(visible_candles.candles) >= 114:
+                    hist_atr_pcts = []
+                    for i in range(14, min(len(visible_candles.candles), 114)):
+                        window = CandleSeries(
+                            candles=visible_candles.candles[i-14:i+1],
+                            symbol=visible_candles.symbol,
+                            exchange=visible_candles.exchange,
+                            timeframe=visible_candles.timeframe,
+                        )
+                        h_atr = self._calculate_atr(window, self.config.atr_period)
+                        if h_atr and h_atr > 0:
+                            p = visible_candles.candles[i].close
+                            if p > 0:
+                                hist_atr_pcts.append(h_atr / p)
+                    if len(hist_atr_pcts) >= 20:
+                        avg_atr_pct = sum(hist_atr_pcts) / len(hist_atr_pcts)
+                        vol_ratio = current_atr_pct / avg_atr_pct if avg_atr_pct > 0 else 1.0
+                        # If current vol is 2x+ the average, reduce position by half
+                        if vol_ratio > 2.0:
+                            signal.quantity *= 0.5
+                            self._risk_filter_stats["vol_spike_reduced"] = (
+                                self._risk_filter_stats.get("vol_spike_reduced", 0) + 1
+                            )
+
+        return signal
 
         regime = self._last_regime_result
 
@@ -690,17 +772,6 @@ class BacktestEngine:
         elif self.config.use_trailing_stop:
             stop_loss = None  # Trailing stop only — no fixed SL
             take_profit = None  # Trailing stop only — no fixed TP
-            # Zero-DD layer: add bootstrap-based hard stop loss as safety net
-            if (
-                self.config.use_zero_drawdown_layer
-                and signal.bootstrap_stop_pct is not None
-                and signal.bootstrap_stop_pct > 0
-            ):
-                sl_distance = fill_price * signal.bootstrap_stop_pct
-                if is_long:
-                    stop_loss = fill_price - sl_distance
-                else:
-                    stop_loss = fill_price + sl_distance
         else:
             sl_distance = fill_price * self.config.stop_loss_pct
             tp_distance = fill_price * self.config.take_profit_pct

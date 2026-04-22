@@ -80,6 +80,48 @@ class Position:
         )
         self.updated_at = datetime.utcnow()
 
+    def reduce_entries(self, fraction: float) -> tuple[float, float]:
+        """Remove FIFO entries to reduce position by a fraction.
+
+        Removes entries from the front of the list (earliest first).
+        If the last entry to remove is partial, splits it.
+
+        Args:
+            fraction: Fraction of total quantity to remove (0.0-1.0).
+
+        Returns:
+            (closed_quantity, closed_entry_value) — quantity and cost basis
+            of the removed entries. Used for PnL calculation and capital return.
+        """
+        if fraction <= 0.0 or not self.entries:
+            return 0.0, 0.0
+
+        total_qty = self.total_quantity
+        target_close = total_qty * min(fraction, 1.0)
+        closed_qty = 0.0
+        closed_value = 0.0
+
+        while target_close > 0.0 and self.entries:
+            entry = self.entries[0]
+            entry_qty = entry["quantity"]
+            entry_price = entry["price"]
+
+            if entry_qty <= target_close:
+                # Remove entire entry
+                self.entries.pop(0)
+                closed_qty += entry_qty
+                closed_value += entry_qty * entry_price
+                target_close -= entry_qty
+            else:
+                # Partial remove: split the entry
+                entry["quantity"] = entry_qty - target_close
+                closed_qty += target_close
+                closed_value += target_close * entry_price
+                target_close = 0.0
+
+        self.updated_at = datetime.utcnow()
+        return closed_qty, closed_value
+
     def update_price(self, price: float) -> None:
         """Update current market price and track extremes for trailing stops."""
         self.current_price = price

@@ -21,6 +21,7 @@ from ..risk.pre_trade_filter import PreTradeDrawdownFilter, TradeVerdict
 from ..risk.boltzmann_sizer import BoltzmannPositionSizer, BoltzmannConfig
 from ..risk.bootstrap_stops import BootstrapStopCalculator
 from ..risk.drawdown_budget import DrawdownBudgetTracker, DrawdownBudgetConfig
+from ..risk.adaptive_sizer import AdaptivePositionSizer, AdaptiveSizerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,12 @@ class BacktestConfig:
     bootstrap_max_stop_pct: float = 0.10  # Maximum bootstrap stop (10%)
     per_trade_drawdown_budget: float = 0.01  # 1% max drawdown per trade
     total_drawdown_budget: float = 0.03  # 3% total drawdown budget per session
+
+    # Adaptive position sizing (intra-trade soft stops, regime-aware)
+    use_adaptive_sizing: bool = True  # Reduce positions during dangerous regimes as losses grow
+    adaptive_thresholds: dict | None = None  # Override per-regime thresholds; None = defaults
+    adaptive_cooldown_candles: int = 15  # Min candles between partial closes
+    adaptive_min_energy: float = 0.3  # Only activate above this regime energy
 
 
 @dataclass
@@ -148,6 +155,7 @@ class BacktestEngine:
         self._bootstrap_stops: Optional[BootstrapStopCalculator] = None
         self._budget_tracker: Optional[DrawdownBudgetTracker] = None
         self._last_regime_result: Optional[RegimeResult] = None
+        self._adaptive_sizer: Optional[AdaptivePositionSizer] = None
         self._risk_filter_stats: dict[str, int] = {}  # Diagnostics
         if self.config.use_zero_drawdown_layer:
             self._init_risk_layer()
@@ -184,7 +192,19 @@ class BacktestEngine:
             "worst_case_rejected": 0,
             "boltzmann_reduced": 0,
             "vol_spike_reduced": 0,
+            "adaptive_reduced": 0,
         }
+        # Adaptive position sizer (intra-trade soft stops, regime-aware)
+        if cfg.use_adaptive_sizing:
+            sizer_kwargs: dict = {
+                "cooldown_candles": cfg.adaptive_cooldown_candles,
+                "min_energy": cfg.adaptive_min_energy,
+            }
+            if cfg.adaptive_thresholds is not None:
+                sizer_kwargs["regime_thresholds"] = cfg.adaptive_thresholds
+            self._adaptive_sizer = AdaptivePositionSizer(
+                config=AdaptiveSizerConfig(**sizer_kwargs),
+            )
 
     def reset(self) -> None:
         """Reset backtest state for new run."""
@@ -448,6 +468,28 @@ class BacktestEngine:
                         self._close_position(
                             position, position.trailing_stop, candle.volume, "trailing_stop"
                         )
+
+            # Adaptive position sizing: reduce if unrealized losses exceed thresholds
+            if self._adaptive_sizer is not None and position in self.positions:
+                pnl_pct = position.unrealized_pnl_pct
+                if pnl_pct < 0:
+                    last_reduce = getattr(position, "_last_reduce_candle", -999)
+                    candles_since = candle_idx - last_reduce
+                    regime = self._last_regime_result.regime if self._last_regime_result else None
+                    energy = self._last_regime_result.energy if self._last_regime_result else 0.0
+                    reduce_frac = self._adaptive_sizer.evaluate(
+                        pnl_pct, candles_since, regime=regime, regime_energy=energy,
+                    )
+                    if reduce_frac > 0:
+                        if reduce_frac >= 1.0:
+                            # Full close at current price
+                            self._close_position(
+                                position, candle.close, candle.volume, "adaptive_close"
+                            )
+                        else:
+                            self._partial_close_position(
+                                position, reduce_frac, candle.close, candle.volume, candle_idx,
+                            )
 
     # Regime-adaptive trailing stop parameters
     # Only tighten during CRASH — other regimes keep wide trailing for profitability
@@ -902,6 +944,82 @@ class BacktestEngine:
         # Remove position
         if position in self.positions:
             self.positions.remove(position)
+
+    def _partial_close_position(
+        self,
+        position: Position,
+        fraction: float,
+        current_price: float,
+        volume: float,
+        candle_idx: int,
+    ) -> None:
+        """Close a fraction of a position using FIFO entry reduction.
+
+        Args:
+            position: Position to partially close.
+            fraction: Fraction of position to close (0.0-1.0).
+            current_price: Current market price.
+            volume: Candle volume for slippage.
+            candle_idx: Current candle index (for cooldown tracking).
+        """
+        closed_qty, closed_entry_value = position.reduce_entries(fraction)
+        if closed_qty <= 0:
+            return
+
+        # Calculate fill price with slippage
+        fill_price = self.fill_simulator.calculate_fill_price(
+            current_price,
+            position.side != "long",  # Closing direction
+            volume,
+        )
+
+        # Calculate PnL on closed fraction
+        if position.side == "long":
+            pnl = (fill_price - closed_entry_value / closed_qty) * closed_qty
+        else:
+            avg_entry = closed_entry_value / closed_qty if closed_qty > 0 else 0.0
+            pnl = (avg_entry - fill_price) * closed_qty
+
+        close_value = fill_price * closed_qty
+        commission_cost = close_value * self.config.commission
+        net_pnl = pnl - commission_cost
+
+        # Return capital from closed fraction
+        self.capital += closed_entry_value + net_pnl
+
+        # Record to budget tracker
+        if self._budget_tracker is not None:
+            self._budget_tracker.record_trade_pnl(net_pnl)
+
+        # Mark reduction candle on position for cooldown
+        position._last_reduce_candle = candle_idx  # type: ignore[attr-defined]
+
+        # If position is now empty, remove it
+        if position.total_quantity <= 0:
+            if position in self.positions:
+                self.positions.remove(position)
+            reason = "adaptive_close"
+        else:
+            reason = "adaptive_reduce"
+
+        # Record partial trade
+        self.trades.append(
+            {
+                "timestamp": datetime.utcnow(),
+                "symbol": position.symbol,
+                "side": "partial_close",
+                "entry_price": closed_entry_value / closed_qty if closed_qty > 0 else 0,
+                "exit_price": fill_price,
+                "quantity": closed_qty,
+                "pnl": net_pnl,
+                "pnl_pct": (net_pnl / closed_entry_value * 100) if closed_entry_value > 0 else 0,
+                "reason": reason,
+                "commission": commission_cost,
+                "reduce_fraction": fraction,
+            }
+        )
+
+        self._risk_filter_stats["adaptive_reduced"] += 1
 
     def _calculate_equity(self, current_price: float) -> float:
         """Calculate total equity including positions."""

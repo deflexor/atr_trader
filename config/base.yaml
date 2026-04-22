@@ -38,6 +38,10 @@ risk:
   bootstrap_simulations: 1000
   per_trade_drawdown_budget: 0.01
   total_drawdown_budget: 0.03
+  # Adaptive position sizing (intra-trade soft stops, regime-aware)
+  adaptive_sizing: true
+  adaptive_cooldown_candles: 15
+  adaptive_min_energy: 0.3
 
 strategy:
   pyramid_entries: 2

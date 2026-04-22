@@ -116,6 +116,7 @@ def test_engine_risk_layer():
     assert engine._boltzmann_sizer is not None
     assert engine._bootstrap_stops is not None
     assert engine._pre_trade_filter is not None
+    assert engine._adaptive_sizer is not None
 
     # Test with risk layer disabled
     cfg_off = BacktestConfig(use_zero_drawdown_layer=False)
@@ -125,6 +126,90 @@ def test_engine_risk_layer():
     print("6. EngineRiskLayer: OK (on/off)")
 
 
+def test_adaptive_sizer():
+    """Test regime-aware adaptive position sizer."""
+    from src.risk.adaptive_sizer import AdaptivePositionSizer, AdaptiveSizerConfig
+    from src.risk.regime_detector import MarketRegime
+
+    sizer = AdaptivePositionSizer()
+    print("7. AdaptiveSizer (regime-aware):")
+
+    # No reduction during CALM_TRENDING (not in active regimes)
+    frac = sizer.evaluate(-5.0, 999, regime=MarketRegime.CALM_TRENDING, regime_energy=0.5)
+    print(f"   -5.0% PnL, CALM_TRENDING: reduce={frac:.2f}")
+    assert frac == 0.0
+
+    # No reduction during MEAN_REVERTING (not in active regimes)
+    frac = sizer.evaluate(-5.0, 999, regime=MarketRegime.MEAN_REVERTING, regime_energy=0.5)
+    print(f"   -5.0% PnL, MEAN_REVERTING: reduce={frac:.2f}")
+    assert frac == 0.0
+
+    # CRASH: -2% → 25%
+    frac = sizer.evaluate(-2.0, 999, regime=MarketRegime.CRASH, regime_energy=0.5)
+    print(f"   -2.0% PnL, CRASH: reduce={frac:.2f}")
+    assert abs(frac - 0.25) < 0.01
+
+    # CRASH: -3% → 50%
+    frac = sizer.evaluate(-3.0, 999, regime=MarketRegime.CRASH, regime_energy=0.5)
+    print(f"   -3.0% PnL, CRASH: reduce={frac:.2f}")
+    assert abs(frac - 0.50) < 0.01
+
+    # CRASH: -5% → close entirely
+    frac = sizer.evaluate(-5.0, 999, regime=MarketRegime.CRASH, regime_energy=0.5)
+    print(f"   -5.0% PnL, CRASH: reduce={frac:.2f}")
+    assert abs(frac - 1.0) < 0.01
+
+    # VOLATILE_TRENDING: -3% → 25%
+    frac = sizer.evaluate(-3.0, 999, regime=MarketRegime.VOLATILE_TRENDING, regime_energy=0.5)
+    print(f"   -3.0% PnL, VOLATILE_TRENDING: reduce={frac:.2f}")
+    assert abs(frac - 0.25) < 0.01
+
+    # No reduction when regime energy is too low
+    frac = sizer.evaluate(-5.0, 999, regime=MarketRegime.CRASH, regime_energy=0.1)
+    print(f"   -5.0% PnL, CRASH, energy=0.1: reduce={frac:.2f}")
+    assert frac == 0.0
+
+    # Cooldown: no reduction within cooldown window
+    frac = sizer.evaluate(-5.0, 5, regime=MarketRegime.CRASH, regime_energy=0.5)
+    print(f"   -5.0% PnL, CRASH, 5 candles since: reduce={frac:.2f}")
+    assert frac == 0.0
+
+    # No regime → no reduction
+    frac = sizer.evaluate(-5.0, 999, regime=None, regime_energy=0.0)
+    print(f"   -5.0% PnL, no regime: reduce={frac:.2f}")
+    assert frac == 0.0
+
+
+def test_position_reduce_entries():
+    """Test Position.reduce_entries() for partial close support."""
+    from src.core.models.position import Position
+
+    pos = Position(symbol="BTC", side="long")
+    pos.add_entry(70000.0, 0.01)
+    pos.add_entry(71000.0, 0.01)
+    pos.update_price(70000.0)
+
+    print("8. Position.reduce_entries:")
+    total_qty = pos.total_quantity
+    print(f"   Initial: qty={total_qty:.4f}, entries={len(pos.entries)}")
+    assert abs(total_qty - 0.02) < 1e-6
+
+    # Reduce 50% — should remove first entry entirely
+    closed_qty, closed_value = pos.reduce_entries(0.5)
+    print(f"   After 50% reduce: closed_qty={closed_qty:.4f}, "
+          f"closed_value={closed_value:.2f}, remaining_entries={len(pos.entries)}")
+    assert abs(closed_qty - 0.01) < 1e-6
+    assert abs(closed_value - 700.0) < 0.01  # 70000 * 0.01
+    assert len(pos.entries) == 1
+    assert abs(pos.total_quantity - 0.01) < 1e-6
+
+    # Reduce 100% of remaining
+    closed_qty, closed_value = pos.reduce_entries(1.0)
+    print(f"   After 100% reduce: closed_qty={closed_qty:.4f}, entries={len(pos.entries)}")
+    assert abs(closed_qty - 0.01) < 1e-6
+    assert len(pos.entries) == 0
+
+
 if __name__ == "__main__":
     test_regime_detector()
     test_bootstrap_stops()
@@ -132,4 +217,6 @@ if __name__ == "__main__":
     test_boltzmann_sizer()
     test_pre_trade_filter()
     test_engine_risk_layer()
+    test_adaptive_sizer()
+    test_position_reduce_entries()
     print("\nAll smoke tests PASSED")

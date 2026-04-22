@@ -1,8 +1,8 @@
-# Next Session: Zero-Drawdown Risk Layer — Phase 2
+# Next Session: Zero-Drawdown Risk Layer — Phase 2+
 
 ## Current State
 
-The zero-drawdown risk layer (Phase 1) is committed and live on branch `news`.
+Phase 1 risk layer is committed on branch `news`. Phase 2 Approach C (Adaptive Position Sizing) is implemented and tested.
 
 ### What's Implemented (`src/risk/`)
 - **RegimeDetector**: GMM-inspired regime classification (CALM_TRENDING, VOLATILE_TRENDING, MEAN_REVERTING, CRASH)
@@ -11,89 +11,108 @@ The zero-drawdown risk layer (Phase 1) is committed and live on branch `news`.
 - **BootstrapStopCalculator**: Bootstrapped worst-case stop distances (available but currently disabled)
 - **DrawdownBudgetTracker**: Cumulative per-session drawdown budget with halt/resume
 - **Vol-spike detection**: Reduces position 50% when current ATR is 2x+ the 100-candle average
+- **AdaptivePositionSizer** (NEW): Regime-aware graduated soft stops that reduce positions during dangerous regimes
+- **Position.reduce_entries()** (NEW): FIFO partial close support on the Position model
+- **Engine._partial_close_position()** (NEW): Partial close with slippage, PnL tracking, budget recording
 
 ### What's Integrated
 - Risk layer wired into `BacktestEngine` via `use_zero_drawdown_layer=True`
+- Adaptive sizer wired via `use_adaptive_sizing=True` (enabled by default)
 - Regime-adaptive trailing stops (tighter during CRASH only)
-- `BacktestConfig` extended with all risk layer params
-- `config/base.yaml` has new zero-drawdown settings
+- `BacktestConfig` extended with all risk layer + adaptive sizing params
+- `config/base.yaml` has all settings
 - `Signal` model has `regime`, `risk_verdict`, `bootstrap_stop_pct` fields
 
-### 60-Day BTC Backtest Results (Phase 1)
+### Phase 2 Backtest Results (Approach C: Adaptive Position Sizing)
+
+**Static thresholds (-1%/-2%/-3%)** — kills win rate:
 ```
-              Baseline    Zero-DD     Change
-Return:       +2.04%     +1.42%     -0.61pp  (kept 70%)
-Win Rate:     80.8%      75.5%      -5.3pp   (acceptable)
-Max Drawdown:  8.99%      9.04%     ~same
-Trades:        118        110
-CRASH entries blocked: 11
-Boltzmann reductions: 77
+               Phase 1     Static     Change
+Return:        +0.65%     -0.01%     -0.66pp  (destroyed)
+Win Rate:      60.0%       7.1%     -52.9pp  (catastrophic)
+Max Drawdown:   2.79%      5.80%    +3.01pp   (worse!)
+Partial closes: 0         76
 ```
 
-### The Problem
-The 9% max drawdown comes from a **single sudden adverse move** (BTC $75K→$65K in late March). The regime detector showed energy=0.12 (very confident, low risk) right up until the crash. No pre-trade filter can prevent this — it's inherent market risk from being in a position when a sudden move happens.
+**Regime-aware defaults (CRASH: -2%/-3%/-5%, VOLATILE: -3%/-5%/-8%)** — minimal impact:
+```
+               Phase 1     Regime-Aware   Change
+Return:        +0.65%      +0.16%        -0.49pp
+Win Rate:      60.0%       41.9%        -18.1pp
+Max Drawdown:   2.79%       2.85%        +0.06pp  (negligible)
+Partial closes: 0          12
+```
 
-## Phase 2: Three Approaches to Actually Reduce Drawdown
+**During Feb 5-6 crash week (-15% BTC)**:
+```
+               Phase 1     Regime-Aware   Change
+Return:        -5.03%     -5.10%        -0.07pp
+Max Drawdown:   5.44%      5.50%        +0.06pp
+Partial closes: 0          2
+```
 
-### Approach A: Short Hedging
-When drawdown exceeds a threshold (e.g. 3%), open an opposing hedge position to limit further losses.
+### The Problem with Approach C
+1. **Trailing stops already handle losers well** — losers close at -0.06% to -0.09%, so there's nothing for the adaptive sizer to improve
+2. **The sizer cuts winners that dip then recover** — even regime-aware, it reduces during CRASH regime which sometimes fires during recoveries
+3. **Regime detection is lagging** — CRASH is detected after the drop, by which time trailing stops have already closed positions
+4. **The 9% drawdown from Phase 1 isn't in our dataset** — our data (Sep 2025 – Feb 2026) has a -15% crash, but trailing stops handle it at ~5.5% DD
+5. **The adaptive sizer's value is defensive** — it's insurance for regime-detection failures, not a primary DD reducer
 
-**Implementation:**
-- Add `HedgeManager` to `src/risk/` that monitors open positions
-- When unrealized drawdown on any position exceeds threshold, generate a counter-direction signal
-- Hedge size = fraction of the losing position (e.g. 50%)
-- Close hedge when original position recovers or trailing stop closes both
+## Phase 3: What Might Actually Work
 
-**Files to modify:** `src/risk/hedge_manager.py` (new), `src/backtest/engine.py` (hedge signal generation in candle loop)
+### Approach D: Velocity-Based Adaptive Sizing
+Instead of thresholding on unrealized P&L level, threshold on the **rate of change** of unrealized P&L.
 
-**Expected impact:** Could cap per-trade drawdown at ~3-5% instead of 9%, at the cost of hedge commissions and some profit on reversals.
-
-### Approach B: Correlated Asset Monitoring
-Monitor ETH alongside BTC. If ETH drops, reduce BTC exposure before BTC follows.
-
-**Implementation:**
-- Add `CorrelationMonitor` that tracks cross-asset returns in real-time
-- If ETH drops >1% in last N candles while we hold BTC long, trigger tighter trailing or partial close
-- This works because crypto assets are highly correlated — ETH often leads BTC moves
-
-**Files to modify:** `src/risk/correlation_monitor.py` (new), `src/backtest/engine.py` (multi-asset candle loop), `src/adapters/` (parallel data feed)
-
-**Expected impact:** Early warning system for correlated crashes. Could reduce drawdown 20-40% during cross-asset selloffs.
-
-### Approach C: Adaptive Position Sizing Based on Open P&L
-Scale down positions dynamically as unrealized losses grow.
+**Rationale**: A position at -2% that's been flat for hours is fine. A position that went from 0% to -2% in 3 candles is in trouble. The velocity (acceleration of loss) is the signal, not the absolute level.
 
 **Implementation:**
-- Track unrealized P&L per position on each candle
-- If a position goes negative, reduce its size by closing a fraction
-- Use a graduated scale: -1% → reduce 25%, -2% → reduce 50%, -3% → close entirely
-- This is like a "soft stop" that gradually exits rather than an all-or-nothing stop
+- Track unrealized P&L per position over last N candles
+- If unrealized P&L is dropping faster than X% per candle, trigger reduction
+- This avoids cutting winners that are just in a normal pullback
+- Could be combined with regime: only during CRASH/VOLATILE_TRENDING
 
-**Files to modify:** `src/risk/adaptive_sizer.py` (new), `src/backtest/engine.py` (partial position closing)
+**Files:** `src/risk/adaptive_sizer.py` (add velocity tracking), `src/backtest/engine.py` (pass P&L history)
 
-**Expected impact:** Most promising for drawdown reduction without killing win rate. Instead of a hard stop at -5% (which creates losses), gradually reduce at -1%, -2%, -3%. Winners that recover keep some position; losers get small.
+### Approach A: Short Hedging (still viable)
+When drawdown exceeds a threshold, open an opposing hedge position.
+
+**Why it might work better than Approach C:**
+- Doesn't require reducing the original position (avoids cutting winners)
+- Directly offsets losses with gains on the hedge
+- Can be size-limited to cap the hedge risk
+
+**Files:** `src/risk/hedge_manager.py` (new), `src/backtest/engine.py` (hedge signal generation)
+
+### Approach B: Correlated Asset Monitoring (still viable)
+ETH often leads BTC drops. Early warning system.
+
+**Why it might work:** It's a leading indicator, not a lagging one like regime detection. ETH dropping is a signal that BTC may follow, before it actually does.
+
+**Files:** `src/risk/correlation_monitor.py` (new), multi-asset data pipeline
 
 ## Recommended Priority
-1. **Approach C** (Adaptive Position Sizing) — easiest to implement, most likely to reduce DD without killing win rate
-2. **Approach A** (Short Hedging) — more complex but direct DD cap
-3. **Approach B** (Correlation Monitoring) — requires multi-asset data pipeline
+1. **Approach D** (Velocity-Based Sizing) — enhancement to existing adaptive_sizer.py, doesn't require new modules
+2. **Approach B** (Correlation Monitoring) — leading indicator, could actually prevent DD
+3. **Approach A** (Short Hedging) — more complex, requires careful risk management
 
 ## Key Files Reference
-- `src/risk/` — All risk modules (regime_detector.py, pre_trade_filter.py, boltzmann_sizer.py, bootstrap_stops.py, drawdown_budget.py)
-- `src/backtest/engine.py` — Main backtest loop, `_apply_risk_layer()`, `_get_trailing_params()`, `_update_positions_with_candle()`
-- `src/strategies/momentum_strategy.py` — MomentumStrategy with Kelly sizing, Holt-Winters forecasting
-- `src/ml/forecasting.py` — HoltWintersPredictor
-- `scripts/backtest/zero_drawdown_comparison.py` — Comparison script for baseline vs risk layer
-- `config/base.yaml` — All risk config params
-- `tests/test_risk_smoke.py` — Smoke tests for all risk modules
+- `src/risk/` — All risk modules including new `adaptive_sizer.py`
+- `src/risk/adaptive_sizer.py` — Regime-aware graduated soft stops (AdaptiveSizerConfig, AdaptivePositionSizer)
+- `src/core/models/position.py` — Position model with `reduce_entries()` for partial close
+- `src/backtest/engine.py` — Engine with `_partial_close_position()`, `_adaptive_sizer` field
+- `src/backtest/engine.py` — `_update_positions_with_candle()` now checks adaptive sizer each candle
+- `config/base.yaml` — All risk config params including `adaptive_sizing`, `adaptive_cooldown_candles`, `adaptive_min_energy`
+- `tests/test_risk_smoke.py` — Smoke tests for all risk modules including `test_adaptive_sizer()`, `test_position_reduce_entries()`
+- `scripts/backtest/adaptive_threshold_sweep.py` — Threshold sweep comparison script
+- `scripts/backtest/adaptive_sizing_comparison.py` — Phase 1 vs Phase 2 comparison script
 
-## Key Lessons from Phase 1
-1. **Bootstrap hard SL kills win rate** — removed. Trailing stops already handle losers well (80% WR)
-2. **Regime detection is lagging** — CRASH is only detected AFTER the drop, not before
-3. **MEAN_REVERTING is 89% of BTC market** — don't tighten trailing stops for it
-4. **Boltzmann sizing is safe** — 51% reduction in MEAN_REVERTING only costs 19% of avg win
-5. **The drawdown happens inside open positions** — pre-trade filters can't help; need intra-trade management
-6. **Position partial closing is the missing piece** — the engine currently only supports all-or-nothing closes
+## Key Lessons from Phase 2
+1. **Static P&L thresholds kill win rate** — -1%/-2%/-3% is normal BTC noise, not danger
+2. **Regime-aware filtering helps but barely activates** — CRASH is lagging; most of the time = MEAN_REVERTING (excluded)
+3. **Trailing stops are already excellent** — losers close at -0.06% to -0.09%, no room for soft stops to help
+4. **Partial close infrastructure is valuable** — `reduce_entries()` and `_partial_close_position()` work correctly and are reusable for hedging
+5. **The problem is detection, not action** — we know HOW to reduce positions; we don't know WHEN (the signal is too laggy)
+6. **Velocity > level** — the rate of unrealized loss is more informative than the absolute level
 
 ## Venv
 ```bash

@@ -22,6 +22,9 @@ from ..risk.boltzmann_sizer import BoltzmannPositionSizer, BoltzmannConfig
 from ..risk.bootstrap_stops import BootstrapStopCalculator
 from ..risk.drawdown_budget import DrawdownBudgetTracker, DrawdownBudgetConfig
 from ..risk.adaptive_sizer import AdaptivePositionSizer, AdaptiveSizerConfig
+from ..risk.velocity_tracker import VelocityTracker, VelocityTrackerConfig
+from ..risk.velocity_sizer import VelocityPositionSizer, VelocitySizerConfig
+from ..risk.correlation_monitor import CorrelationMonitor, CorrelationMonitorConfig, CorrelationRiskLevel
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,27 @@ class BacktestConfig:
     adaptive_thresholds: dict | None = None  # Override per-regime thresholds; None = defaults
     adaptive_cooldown_candles: int = 15  # Min candles between partial closes
     adaptive_min_energy: float = 0.3  # Only activate above this regime energy
+
+    # Velocity-based position sizing (Approach D: rate of loss, not absolute level)
+    use_velocity_sizing: bool = True  # Reduce positions when P&L velocity is high
+    velocity_thresholds: dict | None = None  # Override per-regime velocity thresholds; None = defaults
+    velocity_cooldown_candles: int = 10  # Min candles between partial closes (shorter — velocity is faster signal)
+    velocity_min_energy: float = 0.3  # Only activate above this regime energy
+    velocity_min_pnl_pct: float = -0.3  # Must be losing at least this % to trigger
+    velocity_acceleration_scale: float = 1.3  # Max acceleration amplification
+    velocity_window_candles: int = 5  # Rolling window for velocity computation
+    velocity_min_samples: int = 3  # Minimum samples before velocity is valid
+
+    # Correlation monitoring (Approach B: ETH leading BTC indicator)
+    use_correlation_monitor: bool = True  # Track ETH/BTC divergence as leading risk signal
+    correlation_lookback_candles: int = 20  # Lookback window for ETH/BTC return comparison
+    correlation_mild_divergence_pct: float = -0.8  # ETH dropping >0.8% more than BTC → ELEVATED
+    correlation_strong_divergence_pct: float = -1.6  # ETH dropping >1.6% more than BTC → HIGH
+    correlation_extreme_divergence_pct: float = -2.5  # ETH dropping >2.5% more than BTC → EXTREME
+    correlation_trailing_elevated: float = 0.75  # Tighten trailing by 25% at ELEVATED
+    correlation_trailing_high: float = 0.50  # Tighten trailing by 50% at HIGH
+    correlation_trailing_extreme: float = 0.25  # Tighten trailing by 75% at EXTREME
+    correlation_reduce_at_extreme: float = 0.25  # Reduce position 25% at EXTREME
 
 
 @dataclass
@@ -156,6 +180,11 @@ class BacktestEngine:
         self._budget_tracker: Optional[DrawdownBudgetTracker] = None
         self._last_regime_result: Optional[RegimeResult] = None
         self._adaptive_sizer: Optional[AdaptivePositionSizer] = None
+        self._velocity_tracker: Optional[VelocityTracker] = None
+        self._velocity_sizer: Optional[VelocityPositionSizer] = None
+        self._correlation_monitor: Optional[CorrelationMonitor] = None
+        self._secondary_candles: Optional[CandleSeries] = None  # ETH candles for correlation
+        self._last_correlation_signal: Optional[CorrelationSignal] = None  # type: ignore[name-defined]
         self._risk_filter_stats: dict[str, int] = {}  # Diagnostics
         if self.config.use_zero_drawdown_layer:
             self._init_risk_layer()
@@ -193,6 +222,7 @@ class BacktestEngine:
             "boltzmann_reduced": 0,
             "vol_spike_reduced": 0,
             "adaptive_reduced": 0,
+            "velocity_reduced": 0,
         }
         # Adaptive position sizer (intra-trade soft stops, regime-aware)
         if cfg.use_adaptive_sizing:
@@ -205,6 +235,44 @@ class BacktestEngine:
             self._adaptive_sizer = AdaptivePositionSizer(
                 config=AdaptiveSizerConfig(**sizer_kwargs),
             )
+        # Velocity-based position sizer (Approach D: rate of loss detection)
+        if cfg.use_velocity_sizing:
+            vel_sizer_kwargs: dict = {
+                "cooldown_candles": cfg.velocity_cooldown_candles,
+                "min_energy": cfg.velocity_min_energy,
+                "min_pnl_pct": cfg.velocity_min_pnl_pct,
+                "acceleration_scale": cfg.velocity_acceleration_scale,
+                "tracker_window_candles": cfg.velocity_window_candles,
+                "tracker_min_samples": cfg.velocity_min_samples,
+            }
+            if cfg.velocity_thresholds is not None:
+                vel_sizer_kwargs["regime_velocity_thresholds"] = cfg.velocity_thresholds
+            self._velocity_sizer = VelocityPositionSizer(
+                config=VelocitySizerConfig(**vel_sizer_kwargs),
+            )
+            self._velocity_tracker = VelocityTracker(
+                config=VelocityTrackerConfig(
+                    window_candles=cfg.velocity_window_candles,
+                    min_samples=cfg.velocity_min_samples,
+                ),
+            )
+        # Correlation monitoring (Approach B: ETH leading BTC indicator)
+        if cfg.use_correlation_monitor:
+            self._correlation_monitor = CorrelationMonitor(
+                config=CorrelationMonitorConfig(
+                    lookback_candles=cfg.correlation_lookback_candles,
+                    mild_divergence_pct=cfg.correlation_mild_divergence_pct,
+                    strong_divergence_pct=cfg.correlation_strong_divergence_pct,
+                    extreme_divergence_pct=cfg.correlation_extreme_divergence_pct,
+                    trailing_tighten_elevated=cfg.correlation_trailing_elevated,
+                    trailing_tighten_high=cfg.correlation_trailing_high,
+                    trailing_tighten_extreme=cfg.correlation_trailing_extreme,
+                    reduce_at_extreme=cfg.correlation_reduce_at_extreme,
+                ),
+            )
+            self._risk_filter_stats["correlation_elevated"] = 0
+            self._risk_filter_stats["correlation_high"] = 0
+            self._risk_filter_stats["correlation_extreme"] = 0
 
     def reset(self) -> None:
         """Reset backtest state for new run."""
@@ -231,6 +299,10 @@ class BacktestEngine:
             self._regime_detector.reset()
         if self._bootstrap_stops is not None:
             self._bootstrap_stops.reset()
+        if self._velocity_tracker is not None:
+            self._velocity_tracker.reset()
+        if self._correlation_monitor is not None:
+            self._correlation_monitor.reset()
         for key in self._risk_filter_stats:
             self._risk_filter_stats[key] = 0
 
@@ -258,6 +330,7 @@ class BacktestEngine:
         signal_generator: Callable[[str, CandleSeries], Signal],
         initial_capital: Optional[float] = None,
         kelly_sizer=None,  # Optional[KellyPositionSizer] for geometric sizing
+        secondary_candles: Optional[CandleSeries] = None,  # ETH candles for correlation monitoring
     ) -> BacktestResult:
         """Run backtest on historical data.
 
@@ -266,6 +339,7 @@ class BacktestEngine:
             signal_generator: Function that generates signals from candles
             initial_capital: Override initial capital
             kelly_sizer: Optional KellyPositionSizer for geometric position sizing
+            secondary_candles: Optional secondary asset candles (e.g. ETH) for correlation monitoring
 
         Returns:
             BacktestResult with performance metrics
@@ -276,6 +350,9 @@ class BacktestEngine:
             self.capital = initial_capital
         else:
             self.capital = self.config.initial_capital
+
+        # Store secondary candles for correlation monitoring
+        self._secondary_candles = secondary_candles
 
         # Store Kelly sizer for geometric sizing if provided
         if kelly_sizer is not None:
@@ -342,6 +419,14 @@ class BacktestEngine:
                 if prev_close > 0:
                     ret = (candle.close - prev_close) / prev_close
                     self._bootstrap_stops.update(ret)
+
+            # Update correlation monitor with BTC and ETH prices
+            if self._correlation_monitor is not None:
+                self._correlation_monitor.update_btc(candle.close)
+                if self._secondary_candles is not None and i < len(self._secondary_candles.candles):
+                    self._correlation_monitor.update_eth(self._secondary_candles.candles[i].close)
+                if self._correlation_monitor.has_sufficient_data:
+                    self._last_correlation_signal = self._correlation_monitor.evaluate()
 
             # Check drawdown halt
             if self.config.max_drawdown_pct > 0 and self._peak_equity > 0:
@@ -491,6 +576,47 @@ class BacktestEngine:
                                 position, reduce_frac, candle.close, candle.volume, candle_idx,
                             )
 
+            # Velocity-based position sizing: reduce if P&L is dropping rapidly
+            if self._velocity_sizer is not None and self._velocity_tracker is not None and position in self.positions:
+                pnl_pct = position.unrealized_pnl_pct
+                pos_id = id(position)
+                # Update tracker every candle for all open positions
+                self._velocity_tracker.update(pos_id, candle_idx, pnl_pct)
+                vel_result = self._velocity_tracker.compute(pos_id)
+                if vel_result is not None and vel_result.current_pnl_pct < 0:
+                    last_reduce = getattr(position, "_last_reduce_candle", -999)
+                    candles_since = candle_idx - last_reduce
+                    regime = self._last_regime_result.regime if self._last_regime_result else None
+                    energy = self._last_regime_result.energy if self._last_regime_result else 0.0
+                    vel_reduce_frac = self._velocity_sizer.evaluate(
+                        vel_result, candles_since, regime=regime, regime_energy=energy,
+                    )
+                    if vel_reduce_frac > 0:
+                        if vel_reduce_frac >= 1.0:
+                            self._close_position(
+                                position, candle.close, candle.volume, "velocity_close"
+                            )
+                        else:
+                            self._partial_close_position(
+                                position, vel_reduce_frac, candle.close, candle.volume, candle_idx,
+                            )
+
+            # Correlation-based position reduction: ETH leading BTC divergence
+            if self._correlation_monitor is not None and self._last_correlation_signal is not None and position in self.positions:
+                corr_signal = self._last_correlation_signal
+                if corr_signal.position_reduce_fraction > 0 and position.unrealized_pnl_pct < 0:
+                    last_reduce = getattr(position, "_last_reduce_candle", -999)
+                    candles_since = candle_idx - last_reduce
+                    # Use shorter cooldown for correlation — leading signal, faster response
+                    if candles_since >= 5:
+                        self._partial_close_position(
+                            position, corr_signal.position_reduce_fraction,
+                            candle.close, candle.volume, candle_idx,
+                        )
+                        # Track diagnostics
+                        if corr_signal.risk_level == CorrelationRiskLevel.EXTREME:
+                            self._risk_filter_stats["correlation_extreme"] = self._risk_filter_stats.get("correlation_extreme", 0) + 1
+
     # Regime-adaptive trailing stop parameters
     # Only tighten during CRASH — other regimes keep wide trailing for profitability
     _REGIME_TRAILING_MAP: dict[MarketRegime, tuple[float, float]] = {
@@ -501,10 +627,11 @@ class BacktestEngine:
     }
 
     def _get_trailing_params(self) -> tuple[float, float]:
-        """Get trailing stop ATR multipliers adapted to current regime.
+        """Get trailing stop ATR multipliers adapted to current regime + correlation signal.
 
         Returns (activation_atr, distance_atr).
         Falls back to config defaults if no regime detected.
+        Correlation signal can further tighten trailing stops (multiplicative).
         """
         if not self._last_regime_result or not self.config.use_zero_drawdown_layer:
             return self.config.trailing_activation_atr, self.config.trailing_distance_atr
@@ -513,6 +640,12 @@ class BacktestEngine:
             self._last_regime_result.regime,
             (self.config.trailing_activation_atr, self.config.trailing_distance_atr),
         )
+
+        # Apply correlation-based tightening if signal is active
+        if self._last_correlation_signal is not None and self._last_correlation_signal.trailing_atr_multiplier is not None:
+            mult = self._last_correlation_signal.trailing_atr_multiplier
+            params = (params[0] * mult, params[1] * mult)
+
         return params
 
     def _apply_risk_layer(
@@ -944,6 +1077,9 @@ class BacktestEngine:
         # Remove position
         if position in self.positions:
             self.positions.remove(position)
+        # Clean up velocity tracking data for closed position
+        if self._velocity_tracker is not None:
+            self._velocity_tracker.remove(id(position))
 
     def _partial_close_position(
         self,

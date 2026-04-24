@@ -42,6 +42,24 @@ risk:
   adaptive_sizing: true
   adaptive_cooldown_candles: 15
   adaptive_min_energy: 0.3
+  # Velocity-based position sizing (rate of loss detection)
+  velocity_sizing: true
+  velocity_cooldown_candles: 10
+  velocity_min_energy: 0.3
+  velocity_min_pnl_pct: -0.3
+  velocity_acceleration_scale: 1.3
+  velocity_window_candles: 5
+  velocity_min_samples: 3
+  # Correlation monitoring (ETH leading BTC indicator)
+  correlation_monitor: true
+  correlation_lookback_candles: 20
+  correlation_mild_divergence_pct: -0.8
+  correlation_strong_divergence_pct: -1.6
+  correlation_extreme_divergence_pct: -2.5
+  correlation_trailing_elevated: 0.75
+  correlation_trailing_high: 0.50
+  correlation_trailing_extreme: 0.25
+  correlation_reduce_at_extreme: 0.25
 
 strategy:
   pyramid_entries: 2

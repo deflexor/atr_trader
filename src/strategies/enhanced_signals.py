@@ -1,4 +1,4 @@
-"""Enhanced signal generation — breakout, mean-reversion, and trend signals.
+"""Enhanced signal generation — breakout, mean-reversion, trend, VWAP, and divergence signals.
 
 Pure functions that produce trading signals from candle data.
 Union logic: any sub-signal fires → trade, with signal_source
@@ -45,6 +45,16 @@ class EnhancedSignalConfig:
     mean_reversion_strength: float = 0.5
     trend_strength: float = 0.7
 
+    # VWAP deviation signal params
+    vwap_period: int = 100  # candles for VWAP calculation
+    vwap_deviation_threshold: float = 0.02  # 2% deviation from VWAP triggers
+    vwap_enabled: bool = True
+
+    # Momentum divergence signal params
+    divergence_lookback: int = 20  # candles to check for divergence
+    divergence_rsi_threshold: float = 10.0  # RSI must differ by this much
+    divergence_enabled: bool = True
+
 
 @dataclass(frozen=True)
 class SubSignal:
@@ -52,7 +62,7 @@ class SubSignal:
 
     direction: SignalDirection
     strength: float
-    source: str  # "breakout", "mean_reversion", "trend"
+    source: str  # "breakout", "mean_reversion", "trend", "vwap", "divergence"
 
 
 def _calculate_ema(prices: list[float], period: int) -> Optional[float]:
@@ -262,12 +272,152 @@ def compute_trend_signal(
     return SubSignal(SignalDirection.NEUTRAL, 0.0, "trend")
 
 
+def compute_vwap_signal(
+    candles: CandleSeries, config: EnhancedSignalConfig
+) -> SubSignal:
+    """Detect price deviation from VWAP — mean-reversion to volume-weighted price.
+
+    LONG when price is significantly below VWAP (oversold vs volume).
+    SHORT when price is significantly above VWAP (overbought vs volume).
+    Expects reversion to the volume-weighted mean.
+    """
+    if not config.vwap_enabled:
+        return SubSignal(SignalDirection.NEUTRAL, 0.0, "vwap")
+
+    n = config.vwap_period
+    if len(candles.candles) < n:
+        return SubSignal(SignalDirection.NEUTRAL, 0.0, "vwap")
+
+    recent = candles.candles[-n:]
+    # VWAP = sum(typical_price * volume) / sum(volume)
+    cumulative_tp_vol = sum(c.typical_price * c.volume for c in recent)
+    cumulative_vol = sum(c.volume for c in recent)
+
+    if cumulative_vol <= 0:
+        return SubSignal(SignalDirection.NEUTRAL, 0.0, "vwap")
+
+    vwap = cumulative_tp_vol / cumulative_vol
+    current_price = candles.candles[-1].close
+    deviation = (current_price - vwap) / vwap if vwap > 0 else 0.0
+
+    threshold = config.vwap_deviation_threshold
+    if deviation < -threshold:
+        return SubSignal(SignalDirection.LONG, config.breakout_strength * 0.8, "vwap")
+    if deviation > threshold:
+        return SubSignal(SignalDirection.SHORT, config.breakout_strength * 0.8, "vwap")
+
+    return SubSignal(SignalDirection.NEUTRAL, 0.0, "vwap")
+
+
+def compute_divergence_signal(
+    candles: CandleSeries, config: EnhancedSignalConfig
+) -> SubSignal:
+    """Detect momentum divergence — price makes new extreme but RSI doesn't.
+
+    LONG when price makes new low but RSI makes higher low (bullish divergence).
+    SHORT when price makes new high but RSI makes lower high (bearish divergence).
+    Strong reversal signal.
+    """
+    if not config.divergence_enabled:
+        return SubSignal(SignalDirection.NEUTRAL, 0.0, "divergence")
+
+    lookback = config.divergence_lookback
+    rsi_period = config.rsi_period
+    min_candles = lookback + rsi_period + 1
+
+    if len(candles.candles) < min_candles:
+        return SubSignal(SignalDirection.NEUTRAL, 0.0, "divergence")
+
+    closes = candles.closes
+
+    # Split into two halves of lookback
+    half = lookback // 2
+    first_half_closes = closes[-(lookback + 1):-half]
+    second_half_closes = closes[-half - 1:]
+
+    if len(first_half_closes) < rsi_period + 1 or len(second_half_closes) < rsi_period + 1:
+        return SubSignal(SignalDirection.NEUTRAL, 0.0, "divergence")
+
+    # Need enough context for RSI calculation
+    full_first = closes[:-(half + 1)]
+    full_second = closes[:]
+
+    rsi_first = _calculate_rsi(full_first, rsi_period)
+    rsi_second = _calculate_rsi(full_second, rsi_period)
+
+    if rsi_first is None or rsi_second is None:
+        return SubSignal(SignalDirection.NEUTRAL, 0.0, "divergence")
+
+    price_first_low = min(first_half_closes)
+    price_second_low = min(second_half_closes)
+    price_first_high = max(first_half_closes)
+    price_second_high = max(second_half_closes)
+
+    threshold = config.divergence_rsi_threshold
+
+    # Bullish divergence: price makes lower low but RSI makes higher low
+    if price_second_low < price_first_low and rsi_second > rsi_first + threshold:
+        return SubSignal(SignalDirection.LONG, config.mean_reversion_strength, "divergence")
+
+    # Bearish divergence: price makes higher high but RSI makes lower high
+    if price_second_high > price_first_high and rsi_second < rsi_first - threshold:
+        return SubSignal(SignalDirection.SHORT, config.mean_reversion_strength, "divergence")
+
+    return SubSignal(SignalDirection.NEUTRAL, 0.0, "divergence")
+
+    closes = candles.closes
+
+    # Calculate indicators
+    ema_fast = _calculate_ema(closes, config.ema_fast)
+    ema_slow = _calculate_ema(closes, config.ema_slow)
+    rsi = _calculate_rsi(closes, config.rsi_period)
+    macd = _calculate_macd(closes, config.macd_fast, config.macd_slow, config.macd_signal)
+
+    bull_votes = 0
+    bear_votes = 0
+    total = 0
+
+    # EMA trend
+    if ema_fast is not None and ema_slow is not None:
+        total += 1
+        if ema_fast > ema_slow:
+            bull_votes += 1
+        elif ema_fast < ema_slow:
+            bear_votes += 1
+
+    # RSI momentum (above 50 = bullish, below 50 = bearish)
+    if rsi is not None:
+        total += 1
+        if rsi > 50:
+            bull_votes += 1
+        elif rsi < 50:
+            bear_votes += 1
+
+    # MACD histogram
+    if macd is not None:
+        total += 1
+        _line, _sig, histogram = macd
+        if histogram > 0:
+            bull_votes += 1
+        elif histogram < 0:
+            bear_votes += 1
+
+    if bull_votes >= config.min_agreement and bull_votes > bear_votes:
+        strength = config.trend_strength * (bull_votes / max(total, 1))
+        return SubSignal(SignalDirection.LONG, strength, "trend")
+    if bear_votes >= config.min_agreement and bear_votes > bull_votes:
+        strength = config.trend_strength * (bear_votes / max(total, 1))
+        return SubSignal(SignalDirection.SHORT, strength, "trend")
+
+    return SubSignal(SignalDirection.NEUTRAL, 0.0, "trend")
+
+
 def generate_enhanced_signal(
     symbol: str,
     candles: CandleSeries,
     config: EnhancedSignalConfig,
 ) -> Signal:
-    """Generate combined signal from breakout, mean-reversion, and trend.
+    """Generate combined signal from breakout, mean-reversion, trend, VWAP, and divergence.
 
     Union logic: any sub-signal fires → trade.
     If multiple sub-signals agree, strength is boosted.
@@ -276,9 +426,11 @@ def generate_enhanced_signal(
     breakout = compute_breakout_signal(candles, config)
     mean_rev = compute_mean_reversion_signal(candles, config)
     trend = compute_trend_signal(candles, config)
+    vwap = compute_vwap_signal(candles, config)
+    divergence = compute_divergence_signal(candles, config)
 
     # Collect non-neutral sub-signals
-    active = [s for s in (breakout, mean_rev, trend) if s.direction != SignalDirection.NEUTRAL]
+    active = [s for s in (breakout, mean_rev, trend, vwap, divergence) if s.direction != SignalDirection.NEUTRAL]
 
     if not active:
         return Signal(
@@ -315,7 +467,7 @@ def generate_enhanced_signal(
     final_strength = min(1.0, base_strength * synergy)
 
     # Confidence: fraction of signal types that agree
-    total_types = 3
+    total_types = 5  # breakout, mean_reversion, trend, vwap, divergence
     confidence = len(agreeing) / total_types
 
     sources = [s.source for s in agreeing]

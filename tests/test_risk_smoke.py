@@ -439,6 +439,106 @@ def test_correlation_monitor():
     print("   Engine integration: correlation monitor initialized OK")
 
 
+def test_composite_risk_scorer():
+    """Test CompositeRiskScorer combining regime + velocity + correlation."""
+    from src.risk.composite_risk_scorer import (
+        CompositeRiskConfig, CompositeRiskScore, compute_composite_score,
+    )
+    from src.risk.regime_detector import RegimeResult, MarketRegime
+    from src.risk.velocity_tracker import VelocityResult
+    from src.risk.correlation_monitor import CorrelationSignal, CorrelationRiskLevel
+    print("12. CompositeRiskScorer:")
+
+    # No signals → score should be 0
+    score = compute_composite_score(None, None, None)
+    print(f"   No signals: score={score.score:.3f}, trailing={score.trailing_atr_multiplier}")
+    assert score.score == 0.0
+    assert score.trailing_atr_multiplier is None
+    assert score.position_reduce_fraction == 0.0
+
+    # CRASH regime only → elevated score, tighter trailing
+    crash_result = RegimeResult(
+        regime=MarketRegime.CRASH, confidence=0.9,
+        volatility_percentile=0.85, skewness=-1.5,
+        kurtosis_val=5.0, energy=0.8,
+    )
+    score = compute_composite_score(crash_result, None, None)
+    print(f"   CRASH only: score={score.score:.3f}, regime_sub={score.regime_sub_score:.3f}, "
+          f"trailing={score.trailing_atr_multiplier}, synergy={score.synergy_active}")
+    assert score.score > 0.3  # CRASH with high energy should exceed tighten threshold
+    assert score.regime_sub_score > 0.5
+    assert score.trailing_atr_multiplier is not None
+    assert score.trailing_atr_multiplier < 1.0  # Tighter
+
+    # Correlation HIGH only → moderate score
+    corr_signal = CorrelationSignal(
+        risk_level=CorrelationRiskLevel.HIGH,
+        eth_return_pct=-2.0, btc_return_pct=0.0,
+        divergence_pct=-2.0, eth_btc_ratio=0.05,
+        ratio_trend=-0.001,
+        trailing_atr_multiplier=0.5, position_reduce_fraction=0.0,
+    )
+    score = compute_composite_score(None, None, corr_signal)
+    print(f"   Correlation HIGH: score={score.score:.3f}, corr_sub={score.correlation_sub_score:.3f}")
+    assert score.correlation_sub_score == 0.7
+    assert score.score > 0.0
+
+    # Synergy: CRASH + HIGH correlation → score should be MUCH higher than either alone
+    score_synergy = compute_composite_score(crash_result, None, corr_signal)
+    score_crash_only = compute_composite_score(crash_result, None, None)
+    score_corr_only = compute_composite_score(None, None, corr_signal)
+    print(f"   Synergy: CRASH+HIGH score={score_synergy.score:.3f} "
+          f"vs CRASH={score_crash_only.score:.3f} vs HIGH={score_corr_only.score:.3f}")
+    assert score_synergy.score > score_crash_only.score
+    assert score_synergy.score > score_corr_only.score
+    assert score_synergy.synergy_active
+    # Synergy bonus should make combined > max(individual)
+    assert score_synergy.score > max(score_crash_only.score, score_corr_only.score)
+
+    # Velocity + CRASH + correlation → extreme synergy, position reduction
+    vel_result = VelocityResult(
+        current_pnl_pct=-2.0,
+        velocity=-1.5,
+        acceleration=-0.3,
+        window_size=5,
+    )
+    extreme_corr = CorrelationSignal(
+        risk_level=CorrelationRiskLevel.EXTREME,
+        eth_return_pct=-4.0, btc_return_pct=0.0,
+        divergence_pct=-4.0, eth_btc_ratio=0.048,
+        ratio_trend=-0.003,
+        trailing_atr_multiplier=0.25, position_reduce_fraction=0.25,
+    )
+    score_extreme = compute_composite_score(crash_result, vel_result, extreme_corr)
+    print(f"   All signals extreme: score={score_extreme.score:.3f}, "
+          f"reduce={score_extreme.position_reduce_fraction:.3f}, "
+          f"activation_reduction={score_extreme.trailing_activation_reduction:.3f}")
+    assert score_extreme.score > 0.6  # Should trigger reduce threshold
+    assert score_extreme.position_reduce_fraction > 0.0
+    assert score_extreme.trailing_activation_reduction < 1.0  # Earlier activation
+    assert score_extreme.synergy_active
+
+    # Custom config: higher synergy multiplier
+    custom_cfg = CompositeRiskConfig(synergy_multiplier=1.8)
+    score_custom = compute_composite_score(crash_result, None, corr_signal, config=custom_cfg)
+    print(f"   Custom synergy (1.8x): score={score_custom.score:.3f} vs default={score_synergy.score:.3f}")
+    assert score_custom.score >= score_synergy.score  # Higher multiplier = higher or equal
+
+    # Engine integration: composite scorer initialized
+    from src.backtest.engine import BacktestEngine, BacktestConfig
+    cfg_on = BacktestConfig(use_zero_drawdown_layer=True, use_composite_risk=True)
+    engine_on = BacktestEngine(config=cfg_on)
+    assert engine_on._composite_risk_config is not None
+    assert engine_on._last_composite_score is None  # Not computed until run
+    print("   Engine integration: composite risk config initialized OK")
+
+    # Engine integration: disabled
+    cfg_off = BacktestConfig(use_zero_drawdown_layer=True, use_composite_risk=False)
+    engine_off = BacktestEngine(config=cfg_off)
+    assert engine_off._composite_risk_config is None
+    print("   Engine integration: composite risk disabled OK")
+
+
 if __name__ == "__main__":
     test_regime_detector()
     test_bootstrap_stops()
@@ -451,4 +551,5 @@ if __name__ == "__main__":
     test_velocity_tracker()
     test_velocity_sizer()
     test_correlation_monitor()
+    test_composite_risk_scorer()
     print("\nAll smoke tests PASSED")

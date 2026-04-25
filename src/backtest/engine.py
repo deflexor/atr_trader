@@ -25,6 +25,7 @@ from ..risk.adaptive_sizer import AdaptivePositionSizer, AdaptiveSizerConfig
 from ..risk.velocity_tracker import VelocityTracker, VelocityTrackerConfig
 from ..risk.velocity_sizer import VelocityPositionSizer, VelocitySizerConfig
 from ..risk.correlation_monitor import CorrelationMonitor, CorrelationMonitorConfig, CorrelationRiskLevel
+from ..risk.composite_risk_scorer import CompositeRiskConfig, CompositeRiskScore, compute_composite_score
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,19 @@ class BacktestConfig:
     correlation_trailing_high: float = 0.50  # Tighten trailing by 50% at HIGH
     correlation_trailing_extreme: float = 0.25  # Tighten trailing by 75% at EXTREME
     correlation_reduce_at_extreme: float = 0.25  # Reduce position 25% at EXTREME
+
+    # Composite risk scoring (Phase 5: Approach E — synergy from aligned signals)
+    use_composite_risk: bool = True  # Combine regime + velocity + correlation into unified score
+    composite_regime_weight: float = 0.35  # Weight of regime signal
+    composite_velocity_weight: float = 0.30  # Weight of velocity signal
+    composite_correlation_weight: float = 0.35  # Weight of correlation signal
+    composite_synergy_multiplier: float = 1.4  # Bonus when 2+ signals align
+    composite_velocity_max_pct: float = 2.0  # Velocity at which sub-score reaches 1.0
+    composite_trailing_tighten_start: float = 0.3  # Score above which trailing tightens
+    composite_trailing_tighten_scale: float = 0.3  # Trailing multiplier at score=1.0 (lower=tighter)
+    composite_trailing_earlier_activation: float = 0.15  # ATR activation reduction per 0.1 score
+    composite_reduce_threshold: float = 0.6  # Score above which position reduction activates
+    composite_reduce_scale: float = 0.5  # Max reduction fraction at score=1.0
 
 
 @dataclass
@@ -185,6 +199,8 @@ class BacktestEngine:
         self._correlation_monitor: Optional[CorrelationMonitor] = None
         self._secondary_candles: Optional[CandleSeries] = None  # ETH candles for correlation
         self._last_correlation_signal: Optional[CorrelationSignal] = None  # type: ignore[name-defined]
+        self._last_composite_score: Optional[CompositeRiskScore] = None
+        self._composite_risk_config: Optional[CompositeRiskConfig] = None
         self._risk_filter_stats: dict[str, int] = {}  # Diagnostics
         if self.config.use_zero_drawdown_layer:
             self._init_risk_layer()
@@ -273,6 +289,21 @@ class BacktestEngine:
             self._risk_filter_stats["correlation_elevated"] = 0
             self._risk_filter_stats["correlation_high"] = 0
             self._risk_filter_stats["correlation_extreme"] = 0
+        # Composite risk scoring (Phase 5: Approach E)
+        if cfg.use_composite_risk:
+            self._composite_risk_config = CompositeRiskConfig(
+                regime_weight=cfg.composite_regime_weight,
+                velocity_weight=cfg.composite_velocity_weight,
+                correlation_weight=cfg.composite_correlation_weight,
+                synergy_multiplier=cfg.composite_synergy_multiplier,
+                velocity_max_pct_per_candle=cfg.composite_velocity_max_pct,
+                trailing_tighten_start=cfg.composite_trailing_tighten_start,
+                trailing_tighten_scale=cfg.composite_trailing_tighten_scale,
+                trailing_earlier_activation=cfg.composite_trailing_earlier_activation,
+                reduce_threshold=cfg.composite_reduce_threshold,
+                reduce_scale=cfg.composite_reduce_scale,
+            )
+            self._risk_filter_stats["composite_reduce"] = 0
 
     def reset(self) -> None:
         """Reset backtest state for new run."""
@@ -428,6 +459,19 @@ class BacktestEngine:
                 if self._correlation_monitor.has_sufficient_data:
                     self._last_correlation_signal = self._correlation_monitor.evaluate()
 
+            # Compute composite risk score from all signals
+            if self._composite_risk_config is not None:
+                # Get velocity result from first open position (if any)
+                vel_result = None
+                if self._velocity_tracker is not None and self.positions:
+                    vel_result = self._velocity_tracker.compute(id(self.positions[0]))
+                self._last_composite_score = compute_composite_score(
+                    regime_result=self._last_regime_result,
+                    velocity_result=vel_result,
+                    correlation_signal=self._last_correlation_signal,
+                    config=self._composite_risk_config,
+                )
+
             # Check drawdown halt
             if self.config.max_drawdown_pct > 0 and self._peak_equity > 0:
                 drawdown = (self._peak_equity - equity) / self._peak_equity
@@ -554,68 +598,87 @@ class BacktestEngine:
                             position, position.trailing_stop, candle.volume, "trailing_stop"
                         )
 
-            # Adaptive position sizing: reduce if unrealized losses exceed thresholds
-            if self._adaptive_sizer is not None and position in self.positions:
+            # Update velocity tracker for all open positions (needed even with composite risk)
+            if self._velocity_tracker is not None and position in self.positions:
                 pnl_pct = position.unrealized_pnl_pct
-                if pnl_pct < 0:
-                    last_reduce = getattr(position, "_last_reduce_candle", -999)
-                    candles_since = candle_idx - last_reduce
-                    regime = self._last_regime_result.regime if self._last_regime_result else None
-                    energy = self._last_regime_result.energy if self._last_regime_result else 0.0
-                    reduce_frac = self._adaptive_sizer.evaluate(
-                        pnl_pct, candles_since, regime=regime, regime_energy=energy,
-                    )
-                    if reduce_frac > 0:
-                        if reduce_frac >= 1.0:
-                            # Full close at current price
-                            self._close_position(
-                                position, candle.close, candle.volume, "adaptive_close"
-                            )
-                        else:
-                            self._partial_close_position(
-                                position, reduce_frac, candle.close, candle.volume, candle_idx,
-                            )
+                self._velocity_tracker.update(id(position), candle_idx, pnl_pct)
 
-            # Velocity-based position sizing: reduce if P&L is dropping rapidly
-            if self._velocity_sizer is not None and self._velocity_tracker is not None and position in self.positions:
-                pnl_pct = position.unrealized_pnl_pct
-                pos_id = id(position)
-                # Update tracker every candle for all open positions
-                self._velocity_tracker.update(pos_id, candle_idx, pnl_pct)
-                vel_result = self._velocity_tracker.compute(pos_id)
-                if vel_result is not None and vel_result.current_pnl_pct < 0:
-                    last_reduce = getattr(position, "_last_reduce_candle", -999)
-                    candles_since = candle_idx - last_reduce
-                    regime = self._last_regime_result.regime if self._last_regime_result else None
-                    energy = self._last_regime_result.energy if self._last_regime_result else 0.0
-                    vel_reduce_frac = self._velocity_sizer.evaluate(
-                        vel_result, candles_since, regime=regime, regime_energy=energy,
-                    )
-                    if vel_reduce_frac > 0:
-                        if vel_reduce_frac >= 1.0:
-                            self._close_position(
-                                position, candle.close, candle.volume, "velocity_close"
-                            )
-                        else:
+            # Position reduction based on risk signals
+            if position in self.positions:
+                if self.config.use_composite_risk and self._last_composite_score is not None:
+                    # Phase 5: Composite risk score drives position reduction
+                    # This replaces the three independent sizer checks below
+                    composite = self._last_composite_score
+                    if composite.position_reduce_fraction > 0 and position.unrealized_pnl_pct < 0:
+                        last_reduce = getattr(position, "_last_reduce_candle", -999)
+                        candles_since = candle_idx - last_reduce
+                        # Shorter cooldown for composite — leading signals need fast response
+                        if candles_since >= 5:
                             self._partial_close_position(
-                                position, vel_reduce_frac, candle.close, candle.volume, candle_idx,
+                                position, composite.position_reduce_fraction,
+                                candle.close, candle.volume, candle_idx,
                             )
+                            self._risk_filter_stats["composite_reduce"] = self._risk_filter_stats.get("composite_reduce", 0) + 1
+                else:
+                    # Phase 4 fallback: independent sizer checks
+                    # Adaptive position sizing: reduce if unrealized losses exceed thresholds
+                    if self._adaptive_sizer is not None:
+                        pnl_pct = position.unrealized_pnl_pct
+                        if pnl_pct < 0:
+                            last_reduce = getattr(position, "_last_reduce_candle", -999)
+                            candles_since = candle_idx - last_reduce
+                            regime = self._last_regime_result.regime if self._last_regime_result else None
+                            energy = self._last_regime_result.energy if self._last_regime_result else 0.0
+                            reduce_frac = self._adaptive_sizer.evaluate(
+                                pnl_pct, candles_since, regime=regime, regime_energy=energy,
+                            )
+                            if reduce_frac > 0:
+                                if reduce_frac >= 1.0:
+                                    self._close_position(
+                                        position, candle.close, candle.volume, "adaptive_close"
+                                    )
+                                else:
+                                    self._partial_close_position(
+                                        position, reduce_frac, candle.close, candle.volume, candle_idx,
+                                    )
 
-            # Correlation-based position reduction: ETH leading BTC divergence
-            if self._correlation_monitor is not None and self._last_correlation_signal is not None and position in self.positions:
-                corr_signal = self._last_correlation_signal
-                if corr_signal.position_reduce_fraction > 0 and position.unrealized_pnl_pct < 0:
-                    last_reduce = getattr(position, "_last_reduce_candle", -999)
-                    candles_since = candle_idx - last_reduce
-                    # Use shorter cooldown for correlation — leading signal, faster response
-                    if candles_since >= 5:
-                        self._partial_close_position(
-                            position, corr_signal.position_reduce_fraction,
-                            candle.close, candle.volume, candle_idx,
-                        )
-                        # Track diagnostics
-                        if corr_signal.risk_level == CorrelationRiskLevel.EXTREME:
-                            self._risk_filter_stats["correlation_extreme"] = self._risk_filter_stats.get("correlation_extreme", 0) + 1
+                    # Velocity-based position sizing: reduce if P&L is dropping rapidly
+                    if self._velocity_sizer is not None and self._velocity_tracker is not None and position in self.positions:
+                        pnl_pct = position.unrealized_pnl_pct
+                        pos_id = id(position)
+                        self._velocity_tracker.update(pos_id, candle_idx, pnl_pct)
+                        vel_result = self._velocity_tracker.compute(pos_id)
+                        if vel_result is not None and vel_result.current_pnl_pct < 0:
+                            last_reduce = getattr(position, "_last_reduce_candle", -999)
+                            candles_since = candle_idx - last_reduce
+                            regime = self._last_regime_result.regime if self._last_regime_result else None
+                            energy = self._last_regime_result.energy if self._last_regime_result else 0.0
+                            vel_reduce_frac = self._velocity_sizer.evaluate(
+                                vel_result, candles_since, regime=regime, regime_energy=energy,
+                            )
+                            if vel_reduce_frac > 0:
+                                if vel_reduce_frac >= 1.0:
+                                    self._close_position(
+                                        position, candle.close, candle.volume, "velocity_close"
+                                    )
+                                else:
+                                    self._partial_close_position(
+                                        position, vel_reduce_frac, candle.close, candle.volume, candle_idx,
+                                    )
+
+                    # Correlation-based position reduction: ETH leading BTC divergence
+                    if self._correlation_monitor is not None and self._last_correlation_signal is not None and position in self.positions:
+                        corr_signal = self._last_correlation_signal
+                        if corr_signal.position_reduce_fraction > 0 and position.unrealized_pnl_pct < 0:
+                            last_reduce = getattr(position, "_last_reduce_candle", -999)
+                            candles_since = candle_idx - last_reduce
+                            if candles_since >= 5:
+                                self._partial_close_position(
+                                    position, corr_signal.position_reduce_fraction,
+                                    candle.close, candle.volume, candle_idx,
+                                )
+                                if corr_signal.risk_level == CorrelationRiskLevel.EXTREME:
+                                    self._risk_filter_stats["correlation_extreme"] = self._risk_filter_stats.get("correlation_extreme", 0) + 1
 
     # Regime-adaptive trailing stop parameters
     # Only tighten during CRASH — other regimes keep wide trailing for profitability
@@ -627,11 +690,12 @@ class BacktestEngine:
     }
 
     def _get_trailing_params(self) -> tuple[float, float]:
-        """Get trailing stop ATR multipliers adapted to current regime + correlation signal.
+        """Get trailing stop ATR multipliers adapted to current risk state.
 
         Returns (activation_atr, distance_atr).
-        Falls back to config defaults if no regime detected.
-        Correlation signal can further tighten trailing stops (multiplicative).
+        When composite risk scoring is enabled, uses the composite score for
+        trailing parameter adjustment (tightening + earlier activation).
+        Otherwise, uses regime + correlation signal independently (Phase 4 behavior).
         """
         if not self._last_regime_result or not self.config.use_zero_drawdown_layer:
             return self.config.trailing_activation_atr, self.config.trailing_distance_atr
@@ -641,7 +705,17 @@ class BacktestEngine:
             (self.config.trailing_activation_atr, self.config.trailing_distance_atr),
         )
 
-        # Apply correlation-based tightening if signal is active
+        # Phase 5: Composite risk score overrides individual signal logic
+        if self.config.use_composite_risk and self._last_composite_score is not None:
+            score = self._last_composite_score
+            if score.trailing_atr_multiplier is not None:
+                params = (params[0] * score.trailing_atr_multiplier, params[1] * score.trailing_atr_multiplier)
+            # Earlier activation: reduce activation ATR when score is elevated
+            if score.trailing_activation_reduction < 1.0:
+                params = (params[0] * score.trailing_activation_reduction, params[1])
+            return params
+
+        # Phase 4 fallback: correlation-based tightening
         if self._last_correlation_signal is not None and self._last_correlation_signal.trailing_atr_multiplier is not None:
             mult = self._last_correlation_signal.trailing_atr_multiplier
             params = (params[0] * mult, params[1] * mult)

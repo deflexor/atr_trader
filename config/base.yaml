@@ -60,6 +60,18 @@ risk:
   correlation_trailing_high: 0.50
   correlation_trailing_extreme: 0.25
   correlation_reduce_at_extreme: 0.25
+  # Composite risk scoring (Phase 5: synergy from aligned signals)
+  composite_risk: true
+  composite_regime_weight: 0.35
+  composite_velocity_weight: 0.30
+  composite_correlation_weight: 0.35
+  composite_synergy_multiplier: 1.4
+  composite_velocity_max_pct: 2.0
+  composite_trailing_tighten_start: 0.3
+  composite_trailing_tighten_scale: 0.3
+  composite_trailing_earlier_activation: 0.15
+  composite_reduce_threshold: 0.6
+  composite_reduce_scale: 0.5
 
 strategy:
   pyramid_entries: 2

@@ -1,297 +1,394 @@
-# NEXT.md — Live Trading Bot Build Plan
+# NEXT.md — Multi-Year Backtest & Results Pipeline
 
-## Current Best Strategy
+## Overview
 
-**EnhancedSignalGenerator** running on 7 assets concurrently.
+Two scripts to build:
 
-**Proven result**: +8.94%/month across 8 assets (90-day backtest, 7/8 profitable).
+1. **`scripts/backtest/long_backtest.py`** — Multi-year historical backtest
+2. **`scripts/backtest/generate_results.py`** — P/L charts + RESULTS.md
 
-### How to Run the Best Strategy
+---
+
+## Prompt: Build Multi-Year Backtest & Results Pipeline
+
+---
+
+### SCRIPT 1: Long Running Multi-Year Backtest
+
+Build `scripts/backtest/long_backtest.py` that:
+
+#### 1. Data Fetching (ByBit API)
+
+- Fetch historical 5m candles from Bybit via ccxt for ALL available history
+- Fetch from earliest available date (2019 for BTC, later for others) to latest
+- Use incremental batch fetching: 1000 candles per request, resume from last timestamp
+- Handle exchange rate limits with 100ms delay between requests
+- Save each batch immediately to DB to avoid memory exhaustion
+- Progress indicator: print every 10000 candles fetched
+
+```
+Symbols to fetch: BTCUSDT, ETHUSDT, DOGEUSDT, TRXUSDT, SOLUSDT, ADAUSDT, AVAXUSDT, UNIUSDT
+Exchange: bybit
+Timeframe: 5m
+```
+
+#### 2. Database Schema
+
+Create new tables in `data/backtest_results.db` (SQLite):
+
+```sql
+CREATE TABLE backtest_runs (
+    id INTEGER PRIMARY KEY,
+    started_at TEXT,
+    completed_at TEXT,
+    symbols TEXT,           -- JSON array
+    days INTEGER,
+    config_json TEXT,        -- JSON of strategy + backtest config
+    total_return_pct REAL,
+    monthly_return_pct REAL,
+    max_drawdown_pct REAL,
+    total_trades INTEGER,
+    win_rate REAL,
+    sharpe_ratio REAL,
+    sortino_ratio REAL,
+    equity_curve_json TEXT   -- JSON array of {timestamp, equity}
+);
+
+CREATE TABLE trade_log (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER,
+    symbol TEXT,
+    side TEXT,
+    entry_time TEXT,
+    exit_time TEXT,
+    entry_price REAL,
+    exit_price REAL,
+    quantity REAL,
+    pnl REAL,
+    commission REAL,
+    exit_reason TEXT,
+    signal_sources TEXT,     -- JSON array e.g. ["breakout", "trend"]
+    signal_strength REAL,
+    FOREIGN KEY (run_id) REFERENCES backtest_runs(id)
+);
+
+CREATE TABLE equity_snapshots (
+    run_id INTEGER,
+    timestamp TEXT,
+    equity REAL,
+    daily_return_pct REAL,
+    unrealized_pnl REAL,
+    open_positions INTEGER,
+    FOREIGN KEY (run_id) REFERENCES backtest_runs(id)
+);
+
+CREATE TABLE signal_log (
+    run_id INTEGER,
+    timestamp TEXT,
+    symbol TEXT,
+    direction TEXT,
+    strength REAL,
+    sources JSON,
+    regime TEXT,
+    risk_score REAL,
+    acted_on BOOLEAN,
+    reason TEXT
+);
+```
+
+#### 3. Backtest Engine (Multi-Year)
+
+- For each symbol, load all historical candles from DB
+- Run EnhancedSignalGenerator with best config (see below)
+- Run each symbol sequentially (not in parallel — to avoid memory issues)
+- Save EVERY trade to trade_log
+- Save equity snapshots every 100 candles
+- Save signal log every candle (for analysis)
+- Compute performance metrics: total return, Sharpe, Sortino, max drawdown, win rate
+- On completion: update backtest_runs table with final results
+
+Best config to use:
+```python
+SIGNAL_CONFIG = EnhancedSignalConfig(
+    min_agreement=3, rsi_oversold=25.0, rsi_overbought=75.0,
+    bollinger_required=True, breakout_lookback=100,
+    breakout_min_range_pct=0.002, breakout_strength=0.8,
+    mean_reversion_strength=0.7, trend_strength=0.8,
+    vwap_enabled=False, divergence_enabled=False,
+)
+
+BACKTEST_CONFIG = BacktestConfig(
+    initial_capital=10000.0,
+    risk_per_trade=0.03, max_positions=2,
+    cooldown_candles=96, use_trailing_stop=True,
+    trailing_activation_atr=2.0, trailing_distance_atr=1.5,
+    use_atr_stops=True, use_zero_drawdown_layer=False,
+)
+```
+
+#### 4. Progress & Resume
+
+- Track progress in a `backtest_progress` table:
+  - symbol, candles_fetched, candles_total, last_timestamp
+- If script crashes, restart it and it should resume from where it left off
+- Print estimated time remaining every 5 minutes
+- Estimate based on candles processed per second
+
+#### 5. Warning Message
+
+At the start of the script, print a VERY visible warning:
+
+```
+================================================================================
+  WARNING: This backtest will take several hours to complete.
+
+  Fetching multi-year 5m candle data for 8 symbols...
+  Estimated time:
+    - Data fetching: 30-60 minutes (depending on API rate limits)
+    - Backtest execution: 2-4 hours
+
+  Results will be saved to data/backtest_results.db automatically.
+  You can interrupt with Ctrl+C — progress is saved and resumable.
+
+  To run in background:
+    nohup python scripts/backtest/long_backtest.py > backtest.log 2>&1 &
+
+  Check progress:
+    tail -f backtest.log
+================================================================================
+```
+
+#### 6. CLI Arguments
+
+```python
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--symbols", nargs="+", default=ALL_SYMBOLS)
+parser.add_argument("--days", type=int, default=None)  # None = all available
+parser.add_argument("--run-id", type=int, help="Resume run ID")
+parser.add_argument("--workers", type=int, default=1)  # 1 = sequential
+args = parser.parse_args()
+```
+
+---
+
+### SCRIPT 2: Results Generator
+
+Build `scripts/backtest/generate_results.py` that:
+
+#### 1. Read from DB
+
+- Load all completed backtest runs from `backtest_runs` table
+- Load trade_log for each run
+- Load equity_snapshots for each run
+
+#### 2. Generate P/L Charts
+
+Use matplotlib to create charts:
+
+```
+results/charts/
+├── equity_curve.png          # Equity over time with drawdown
+├── monthly_returns.png       # Bar chart of monthly returns
+├── asset_comparison.png      # Per-asset return comparison
+├── drawdown_curve.png        # Drawdown over time
+├── trade_pnl_distribution.png  # Histogram of trade P/L
+├── win_rate_by_symbol.png    # Win rate per symbol
+└── signal_source_pie.png     # Pie chart of signal sources
+```
+
+Charts should:
+- Be clean and readable (white background, labeled axes, legends)
+- Save as PNG at 150 DPI
+- Include title, date range, strategy name
+
+#### 3. Create RESULTS.md
+
+Generate a comprehensive markdown report at `results/RESULTS.md`:
+
+```markdown
+# Backtest Results — Enhanced Signal Generator
+
+**Date**: Generated on [date]
+**Strategy**: EnhancedSignalGenerator (breakout + mean-reversion + trend)
+**Period**: [start_date] to [end_date]
+**Assets**: [list]
+
+## Executive Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Return | +XX.XX% |
+| Monthly Return (annualized) | +XX.XX% |
+| Max Drawdown | XX.XX% |
+| Sharpe Ratio | X.XX |
+| Sortino Ratio | X.XX |
+| Win Rate | XX.X% |
+| Total Trades | XXXX |
+| Profitable Assets | X/8 |
+
+## Performance by Asset
+
+| Symbol | Trades | Win Rate | Return | Max DD | Monthly |
+|--------|--------|----------|--------|--------|---------|
+| BTCUSDT | XXX | XX.X% | +X.XX% | X.XX% | X.XX% |
+| ... | ... | ... | ... | ... | ... |
+
+## Equity Curve
+
+![Equity Curve](charts/equity_curve.png)
+
+## Drawdown Analysis
+
+- Max Drawdown: XX.XX%
+- Average Drawdown: XX.XX%
+- Time in Drawdown: XX%
+- Longest Drawdown Period: X days
+
+![Drawdown Curve](charts/drawdown_curve.png)
+
+## Monthly Returns
+
+| Month | Return | Equity |
+|-------|--------|--------|
+| 2024-01 | +X.XX% | $XXXX |
+| ... | ... | ... |
+
+![Monthly Returns](charts/monthly_returns.png)
+
+## Signal Source Analysis
+
+| Source | Count | % of Trades | Avg P&L |
+|--------|-------|-------------|---------|
+| breakout | XXX | XX.X% | $X.XX |
+| trend | XXX | XX.X% | $X.XX |
+| mean_reversion | XXX | XX.X% | $X.XX |
+
+![Signal Sources](charts/signal_source_pie.png)
+
+## Trade Statistics
+
+- Average trade duration: X hours
+- Average win: $X.XX
+- Average loss: -$X.XX
+- Risk/Reward ratio: X.XX
+- Largest win: $X.XX
+- Largest loss: -$X.XX
+
+![P/L Distribution](charts/trade_pnl_distribution.png)
+
+## Yearly Breakdown
+
+| Year | Return | Monthly Avg | Trades | Win Rate |
+|------|--------|------------|--------|----------|
+| 2022 | +X.XX% | X.XX% | XXXX | XX.X% |
+| 2023 | +X.XX% | X.XX% | XXXX | XX.X% |
+
+## Improvement Guidelines
+
+Based on the data analysis, the following improvements are recommended:
+
+### 1. Signal Type Performance
+- [Which signal type is most profitable]
+- [Which signal type has worst win rate]
+
+### 2. Asset Allocation
+- [Best performing assets — consider increasing allocation]
+- [Worst performing assets — consider reducing or dropping]
+
+### 3. Entry Timing
+- [Best days/times for entries based on trade success]
+- [Times to avoid trading based on hourly/daily patterns]
+
+### 4. Risk Management
+- [Optimal stop loss distance based on ATR analysis]
+- [Take profit level that maximizes Sharpe]
+
+### 5. Cooldown Optimization
+- [Optimal cooldown based on re-entry analysis]
+- [Effects of longer/shorter cooldowns on returns]
+
+### 6. Seasonality
+- [Best months for this strategy]
+- [Worst months — consider reduced sizing]
+```
+
+#### 4. Additional Analysis
+
+- **Consecutive wins/losses** analysis — what is the max winning/losing streak
+- **Time-of-day analysis** — which hours have best/worst returns
+- **Day-of-week analysis** — which days are most profitable
+- **Signal combination analysis** — which 2-signal combinations are most profitable
+- **Recovery analysis** — how long does it take to recover from max drawdown
+
+#### 5. CLI Arguments
+
+```python
+parser.add_argument("--run-id", type=int, default=None)  # Specific run or latest
+parser.add_argument("--charts-only", action="store_true")  # Skip md, only charts
+parser.add_argument("--md-only", action="store_true")  # Skip charts, only md
+parser.add_argument("--output-dir", default="results")  # Results output directory
+```
+
+#### 6. Progress
+
+- Print what is being generated: "Generating equity curve...", "Generating monthly returns..."
+- Create output directory if it doesn't exist
+
+---
+
+## Implementation Notes
+
+### Data Storage Strategy
+
+- Store raw candles in `data/candles.db` (existing)
+- Store backtest results in `data/backtest_results.db` (new)
+- Store charts and RESULTS.md in `results/` (new directory)
+- Use SQLite transactions for data integrity
+- Compress equity_curve_json with zlib if > 1MB
+
+### Performance Considerations
+
+- Load candles from DB in chunks (not all at once)
+- Use cursor iteration for large trade logs
+- Generate charts with tight bounding boxes to keep file sizes small
+- Parallelize chart generation (matplotlib is thread-safe for rendering)
+
+### Chart Style
+
+```python
+import matplotlib.pyplot as plt
+plt.style.use("seaborn-v0_8-whitegrid")
+# Font size: 12 for labels, 14 for titles
+# Figure size: 12x6 for most charts, 16x8 for equity curve
+# Colors: blue for positive, red for negative
+```
+
+### Error Handling
+
+- If a run_id doesn't exist, print error and list available runs
+- If DB is empty, print "No backtest results found. Run long_backtest.py first"
+- If chart generation fails, log warning but continue with other charts
+
+---
+
+## Quick Start
 
 ```bash
 # Activate environment
 source .venv/bin/activate
 
-# Quick 30-day single-asset test (~15s)
-python scripts/backtest/enhanced_signals_90d.py
+# Step 1: Run long backtest (takes hours!)
+# WARNING: This will take several hours. Run in background.
+nohup python scripts/backtest/long_backtest.py > backtest.log 2>&1 &
 
-# Full 90-day 8-asset backtest (~20 min)
-python scripts/backtest/best_8assets_90d.py
+# Check progress
+tail -f backtest.log
+
+# Step 2: Generate results (after backtest completes)
+python scripts/backtest/generate_results.py
+
+# View results
+open results/RESULTS.md
+ls results/charts/
 ```
-
-### Best Config (copy-paste ready)
-
-```python
-from src.strategies.enhanced_signals import EnhancedSignalConfig, generate_enhanced_signal
-from src.backtest.engine import BacktestConfig
-
-SIGNAL_CONFIG = EnhancedSignalConfig(
-    min_agreement=3,
-    rsi_oversold=25.0,
-    rsi_overbought=75.0,
-    bollinger_required=True,
-    breakout_lookback=100,
-    breakout_min_range_pct=0.002,
-    breakout_strength=0.8,
-    mean_reversion_strength=0.7,
-    trend_strength=0.8,
-    vwap_enabled=False,
-    divergence_enabled=False,
-)
-
-BACKTEST_CONFIG = BacktestConfig(
-    initial_capital=1250.0,
-    risk_per_trade=0.03,
-    max_positions=2,
-    cooldown_candles=96,
-    use_trailing_stop=True,
-    trailing_activation_atr=2.0,
-    trailing_distance_atr=1.5,
-    use_atr_stops=True,
-    use_zero_drawdown_layer=False,
-)
-
-SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "DOGEUSDT", "TRXUSDT",
-    "SOLUSDT", "ADAUSDT", "AVAXUSDT",  # Drop UNIUSDT (only loser)
-]
-EXCHANGE = "bybit"
-TIMEFRAME = "5m"
-```
-
----
-
-## Prompt: Build a Live Multi-Asset Crypto Trading Bot
-
-Below is the complete prompt for building a production-grade live trading bot that
-implements the proven EnhancedSignalGenerator strategy with robust safety features.
-
----
-
-### SYSTEM PROMPT FOR LIVE BOT
-
-You are building a production-grade live cryptocurrency trading bot called "PyPSiK Live".
-The bot trades 7 crypto assets concurrently on Bybit exchange using 5-minute candles.
-
-## CORE STRATEGY (PROVEN — DO NOT MODIFY)
-
-The signal generation logic is already proven in backtesting at +8.94%/month.
-Use the EXACT same pure functions from src/strategies/enhanced_signals.py:
-
-- `compute_breakout_signal()`: N-candle high/low break (lookback=100)
-- `compute_mean_reversion_signal()`: RSI < 25 + Bollinger touch
-- `compute_trend_signal()`: EMA+RSI+MACD voting (min_agreement=3)
-- `generate_enhanced_signal()`: Union logic with conflict cancellation and synergy bonus
-
-Config:
-  min_agreement=3, rsi_oversold=25.0, rsi_overbought=75.0,
-  bollinger_required=True, breakout_lookback=100,
-  breakout_min_range_pct=0.002, breakout_strength=0.8,
-  mean_reversion_strength=0.7, trend_strength=0.8,
-  vwap_enabled=False, divergence_enabled=False
-
-Risk parameters:
-  risk_per_trade=0.03 (3%), max_positions=2 per asset,
-  cooldown=96 candles (8h), trailing_activation_atr=2.0,
-  trailing_distance_atr=1.5, use_atr_stops=True
-
-Assets: BTCUSDT, ETHUSDT, DOGEUSDT, TRXUSDT, SOLUSDT, ADAUSDT, AVAXUSDT
-Exchange: Bybit, Timeframe: 5m
-
-## ARCHITECTURE REQUIREMENTS
-
-### 1. Event-Driven Core
-- Async event loop (asyncio) with one task per symbol
-- Each symbol has its own candle buffer (rolling window of 500+ candles)
-- WebSocket connection to Bybit for real-time 5m candle updates
-- On each new candle close: generate signal -> apply risk layer -> execute trade
-- Never block the event loop — all I/O is async
-
-### 2. Order Execution
-- Use ccxt.async_support for Bybit API
-- Market orders for entry (speed > price for 5m timeframe)
-- Limit orders for exit (trailing stops submitted as conditional orders)
-- Handle partial fills gracefully
-- Retry logic: exponential backoff, max 3 retries
-- Order confirmation: verify fill price within 0.5% of expected
-
-### 3. Position Management
-- Track positions in memory with periodic persistence to SQLite
-- Trailing stop: compute ATR-based level each candle, update exchange stop if improved
-- Cooldown enforcement: no new trades within 96 candles (8h) of last trade per symbol
-- Max 2 concurrent positions per symbol
-- Total portfolio exposure cap: max 60% of capital deployed
-
-### 4. Risk Layer (LIVE-SAFE — CRITICAL)
-
-Implement ALL of these safety mechanisms:
-
-a) **Regime Detection** (src/risk/regime_detector.py — reuse)
-   - Feed 1m candle returns to RegimeDetector.update()
-   - Block ALL new trades when regime is CRASH
-   - Reduce position size 50% in VOLATILE_TRENDING
-
-b) **Pre-Trade Filter** (src/risk/pre_trade_filter.py — reuse)
-   - Reject trades exceeding per-trade drawdown budget
-   - Reject trades when total drawdown exceeds 5% daily budget
-
-c) **Anti-Martingale** (built into engine — reuse)
-   - Scale risk 1.25x on wins, 0.5x on 2+ consecutive losses
-   - Cap at 1.5x base risk
-
-d) **Daily Loss Limit** (NEW — for live)
-   - If daily realized loss exceeds 3% of starting equity: HALT all trading for the day
-   - Reset at 00:00 UTC
-   - Send alert notification
-
-e) **Max Open Drawdown** (NEW — for live)
-   - If unrealized drawdown across ALL positions exceeds 8%: close all positions immediately
-   - This is the nuclear circuit breaker
-
-f) **Correlation Monitor** (src/risk/correlation_monitor.py — reuse)
-   - Monitor BTC/ETH divergence as leading risk indicator
-   - When correlation risk is HIGH: reduce new position sizes by 50%
-
-g) **Rate Limiting** (NEW — for live)
-   - Max 1 trade per symbol per 8 hours (96 candles)
-   - Max 10 trades total per 24 hours across all symbols
-   - Max 3 open positions total across portfolio at any time
-
-### 5. Capital Management
-- Starting capital: configurable, default $10,000
-- Capital per asset: total_capital / 7 (equal weight)
-- Position sizing: risk_per_trade * capital * max(signal.strength, 0.3) / price
-- Track realized + unrealized P&L per asset
-- Rebalance allocation weekly (or when an asset's drawdown exceeds 5%)
-
-### 6. Data Pipeline
-- Primary: Bybit WebSocket for real-time 5m candles
-- Fallback: REST API polling every 30s if WebSocket disconnects
-- Candle buffer: 500 candles per symbol (enough for all indicators)
-- On startup: fetch last 500 candles via REST to warm up indicators
-- Detect and handle candle gaps (missed candles, duplicate timestamps)
-- Store all candles in SQLite for audit trail and strategy replay
-
-### 7. Persistence & Recovery
-- All state persisted to SQLite:
-  - Current positions (entry price, size, stop level, trailing state)
-  - Trade history (entry/exit timestamps, prices, PnL)
-  - Equity curve (snapshot every candle)
-  - Signal log (every signal generated, whether acted on or not)
-- On crash restart:
-  1. Load positions from DB
-  2. Sync with exchange (reconcile any fills missed during downtime)
-  3. Rebuild candle buffers from DB + recent REST fetch
-  4. Resume trading with correct cooldown state
-
-### 8. Monitoring & Alerting
-- Telegram bot for real-time notifications:
-  - Trade opened (symbol, direction, size, entry price, signal sources)
-  - Trade closed (symbol, PnL, exit reason)
-  - Risk alerts (regime change, daily loss limit hit, circuit breaker triggered)
-  - Hourly status (equity, open positions, win rate, Sharpe)
-- Web dashboard (simple FastAPI + static HTML):
-  - Equity curve chart
-  - Per-asset P&L table
-  - Current positions
-  - Signal history with source breakdown
-- Health check endpoint for monitoring (uptime, last candle timestamp, connection status)
-
-### 9. Error Handling
-- Exchange API errors: retry with exponential backoff (1s, 2s, 4s)
-- WebSocket disconnection: auto-reconnect within 5s, log gap
-- Invalid candle data: skip candle, log warning
-- Position sync failure: halt trading, alert operator
-- Rate limit hit: back off 60s, then retry
-- Insufficient balance: reduce position size to fit, log warning
-- All errors logged with full context (symbol, timestamp, candle data, stack trace)
-
-### 10. Configuration
-- YAML config file (config/live.yaml):
-  - Exchange credentials (API key, secret — from environment variables only!)
-  - Trading parameters (all EnhancedSignalConfig + BacktestConfig values)
-  - Risk limits (daily loss, max drawdown, rate limits)
-  - Notification settings (Telegram bot token, chat ID)
-  - Logging level and file path
-- Environment variables for secrets (BYBIT_API_KEY, BYBIT_SECRET, TELEGRAM_TOKEN)
-- Config validation on startup (all values within safe ranges)
-
-### 11. Logging
-- Structured JSON logging (timestamp, level, module, message, context)
-- Separate log files: trading.log, risk.log, error.log
-- Log rotation: 100MB per file, keep 10 files
-- Every trade decision logged with:
-  - All sub-signal values (breakout, mean-reversion, trend)
-  - Indicator values (EMA, RSI, MACD, Bollinger, ATR)
-  - Risk layer evaluation (regime, velocity, correlation, composite score)
-  - Final decision (trade/no-trade with reason)
-
-### 12. Testing Requirements
-- Unit tests for all signal functions (already exist for pure functions)
-- Integration test: replay 30 days of historical data through live engine
-- Paper trading mode: same logic but orders are logged, not sent
-- Dry run flag: run for N candles, print what would have been traded
-- Strategy replay: take SQLite trade log, replay through backtest engine, verify same results
-
-### 13. Deployment
-- Docker container with health check
-- Non-root user, read-only config
-- Volume mount for data/ directory (SQLite persistence)
-- Restart policy: unless-stopped
-- Resource limits: 512MB RAM, 1 CPU core
-- Graceful shutdown: close all positions on SIGTERM, wait 30s
-
-### 14. Safety Checklist (MUST PASS BEFORE LIVE)
-
-Before any real money deployment, verify ALL of these:
-
-- [ ] Paper trading for minimum 7 days with consistent results matching backtest
-- [ ] Daily loss limit triggers correctly in simulation
-- [ ] Circuit breaker (8% unrealized DD) triggers correctly
-- [ ] WebSocket reconnection works (test by killing connection)
-- [ ] Crash recovery works (test by killing process, verify state restored)
-- [ ] Position reconciliation with exchange works (test with manually placed order)
-- [ ] All risk modules activated and logging correctly
-- [ ] No API keys in code or config files (environment variables only)
-- [ ] Telegram alerts working for all event types
-- [ ] Cooldown enforcement verified (no rapid-fire trades)
-- [ ] Starting with minimum viable capital (test with $100 first)
-
-## PROJECT STRUCTURE
-
-    src/live/
-    ├── __init__.py
-    ├── bot.py                  # Main event loop, orchestrator
-    ├── candle_feed.py          # WebSocket + REST candle ingestion
-    ├── executor.py             # Order execution with retry logic
-    ├── position_manager.py     # Position tracking, trailing stops, persistence
-    ├── risk_guard.py           # Live risk layer (daily loss, circuit breaker, rate limit)
-    ├── capital_allocator.py    # Per-asset capital allocation + rebalancing
-    ├── notifications.py       # Telegram bot for alerts
-    ├── dashboard.py            # FastAPI web dashboard
-    ├── config.py               # YAML config loader + validation
-    ├── state.py                # SQLite persistence layer
-    └── health.py               # Health check endpoints
-
-## IMPLEMENTATION ORDER
-
-1. **Phase A**: Candle feed (WebSocket + REST fallback) + signal generation (reuse pure functions)
-2. **Phase B**: Paper trading executor (log decisions, no real orders)
-3. **Phase C**: Position management (trailing stops, cooldown enforcement)
-4. **Phase D**: Risk guard (daily loss limit, circuit breaker, regime detection)
-5. **Phase E**: Persistence (SQLite state, crash recovery)
-6. **Phase F**: Notifications (Telegram bot)
-7. **Phase G**: Live execution (ccxt order placement with retry)
-8. **Phase H**: Dashboard + monitoring
-9. **Phase I**: Docker + deployment
-10. **Phase J**: 7-day paper trading validation, then live with minimum capital
-
-## CRITICAL REMINDERS
-
-- The signal generation is PROVEN. Do NOT "improve" it. Copy the exact pure functions.
-- The risk layer is the most important part. More bots blow up from missing risk checks than bad signals.
-- Start with paper trading. No real money until paper trading matches backtest expectations.
-- Never risk more than you can afford to lose completely.
-- The 8h cooldown exists for a reason. Do not remove it for "more opportunities".
-- UNIUSDT was the only losing asset in backtesting. Drop it for live.
-- Test crash recovery BEFORE live deployment. This is non-negotiable.

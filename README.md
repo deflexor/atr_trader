@@ -2,7 +2,7 @@
 
 > ⚠️ **Disclaimer**: This software is for research and educational purposes only. Not financial advice. Trading cryptocurrencies involves substantial risk of loss.
 
-Automated crypto trading system with enhanced signal generation, zero-drawdown risk layer, and multi-asset concurrent execution. Proven **+14.9% monthly return** across 8 assets on 2-year backtests.
+Automated crypto trading system with enhanced signal generation, zero-drawdown risk layer, and multi-asset concurrent execution. Proven **+7.8% monthly return** across 8 assets on 2-year backtests (22 consecutive profitable months, -0.03% max drawdown).
 
 ## Quick Start
 
@@ -23,30 +23,32 @@ python scripts/backtest/best_8assets_90d.py
 
 ## Backtest Results
 
-### 2-Year Run (Apr 2024 → Apr 2026, 8 Assets) ★ Best Data
+### 2-Year Run (Apr 2024 → Jan 2026, 8 Assets) ★ Best Data
 
 | Metric | Value |
 |--------|-------|
-| **Total return** | **+362%** |
-| **Monthly return** | **+14.9%** |
-| **Max drawdown** | 20.9% |
-| **Total trades** | 12,505 (~17/day across 8 assets) |
+| **Total return** | **+433%** |
+| **Monthly return** | **+7.8%** |
+| **Max drawdown** | -0.03% (trade-based) |
+| **Total trades** | 12,505 (~20/day across 8 assets) |
 | **Win rate** | 72.2% |
 | **Sharpe ratio** | 932 |
 | **Sortino ratio** | 8.46 |
 | **Initial capital** | $10,000 |
 | **Risk per trade** | 3% |
+| **Long/Short split** | 50/50 (shorts slightly more profitable) |
+| **Consecutive profitable months** | 22/22 |
 
-| Asset | Trades | Return | Notes |
-|-------|--------|--------|-------|
-| BTCUSDT | ~1,500 | Strong | Best liquidity |
-| ETHUSDT | ~1,500 | Strong | Best correlation to BTC |
-| DOGEUSDT | ~1,600 | Best performer | High volatility = more signals |
-| TRXUSDT | ~1,400 | Moderate | Lower volatility asset |
-| SOLUSDT | ~1,500 | Very strong | Strong trend periods |
-| ADAUSDT | ~1,500 | Very strong | Trending behavior |
-| AVAXUSDT | ~1,500 | Very strong | Similar to SOL |
-| UNIUSDT | ~400 | Moderate | Shorter history, fewer signals |
+| Asset | Trades | Total PnL | Win Rate | Avg Win | Avg Loss |
+|-------|--------|-----------|----------|---------|----------|
+| BTCUSDT | 1,642 | +$2,375 | 64.7% | $2.37 | -$0.25 |
+| ETHUSDT | 1,638 | +$4,710 | 69.4% | $4.28 | -$0.31 |
+| DOGEUSDT | 1,606 | +$6,863 | 74.7% | $5.84 | -$0.36 |
+| TRXUSDT | 1,513 | +$2,382 | 69.9% | $2.37 | -$0.27 |
+| SOLUSDT | 1,669 | +$6,092 | 72.9% | $5.14 | -$0.36 |
+| ADAUSDT | 1,419 | +$6,776 | 76.3% | $6.37 | -$0.37 |
+| AVAXUSDT | 1,378 | +$5,570 | 73.7% | $5.62 | -$0.38 |
+| UNIUSDT | 1,640 | +$8,542 | 76.0% | $6.97 | -$0.39 |
 
 ### 90-Day Run (Dec 2025 → Feb 2026, 8 Assets)
 
@@ -302,11 +304,14 @@ asyncio.run(fetch())
 
 - **3% risk per trade is optimal** — 4-5% risk reduces returns due to amplified drawdowns
 - **8h cooldown is the sweet spot** — shorter = overtrading, longer = missed opportunities
-- **7/8 assets profitable** — strategy is robust across different market conditions
+- **8/8 assets profitable** — strategy is robust across different market conditions
 - **VWAP and divergence signals added noise, not alpha** — disabled in best config
 - **Anti-martingale (built into engine)** scales risk 1.25× on wins, 0.5× on consecutive losses
 - **Breakout with lookback=100** (8h window) catches real breakouts, avoids noise
 - **Opposite signal close** prevents holding both LONG and SHORT simultaneously — critical fix
+- **Short trades are essential** — 50/50 split, shorts contribute 52% of total PnL
+- **Win/loss ratio of 15:1** — avg win $4.93 vs avg loss $0.33
+- **Slippage is the #1 live risk** — backtest uses 0.05% simulated slippage; real fills will be worse
 
 ## Requirements
 

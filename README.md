@@ -7,19 +7,107 @@ Automated crypto trading system with enhanced signal generation, zero-drawdown r
 ## Quick Start
 
 ```bash
-# Setup
-.venv/bin/python -m pip install -e .
-source .venv/bin/activate
+# Clone and install
+git clone <repo-url> && cd pypsik
+uv sync
 
 # Run 2-year backtest (all 8 assets, ~1 hour)
-python scripts/backtest/long_backtest.py --days 730
+uv run python scripts/backtest/long_backtest.py --days 730
 
 # Run 60-day backtest (~10 min)
-python scripts/backtest/long_backtest.py --days 60
+uv run python scripts/backtest/long_backtest.py --days 60
 
 # Run 90-day backtest with best strategy (takes ~20 min for 8 assets)
-python scripts/backtest/best_8assets_90d.py
+uv run python scripts/backtest/best_8assets_90d.py
 ```
+
+## Live Trading
+
+### Installation
+
+```bash
+# Requires only uv (https://docs.astral.sh/uv/getting-started/installation/)
+git clone <repo-url> && cd pypsik
+uv sync
+```
+
+That's it. `uv sync` reads `pyproject.toml` and installs all dependencies (ccxt, aiosqlite, structlog, etc.) into `.venv/`.
+
+### Configuration
+
+Set your Bybit API credentials as environment variables:
+
+```bash
+export BYBIT_API_KEY="your_api_key_here"
+export BYBIT_API_SECRET="your_api_secret_here"
+```
+
+Create API keys at [Bybit](https://www.bybit.com/app/user/api-management). Use **spot trading** permissions only. Never commit keys to git.
+
+### Running
+
+```bash
+# Start on testnet first (paper trading, no real money)
+uv run python run_live.py --testnet
+
+# Trade specific assets only
+uv run python run_live.py --testnet --symbols BTCUSDT,ETHUSDT
+
+# Customize capital and risk
+uv run python run_live.py --testnet --capital 5000 --risk 0.02
+
+# All options
+uv run python run_live.py --testnet \
+  --symbols BTCUSDT,ETHUSDT,SOLUSDT \
+  --capital 5000 \
+  --risk 0.03 \
+  --max-positions 2
+
+# Go live (real money — start with small capital!)
+uv run python run_live.py --symbols BTCUSDT,ETHUSDT --capital 1000
+```
+
+### Selecting Assets
+
+Use `--symbols` with comma-separated Bybit spot pairs (USDT pairs only):
+
+```bash
+# Conservative: BTC + ETH only
+uv run python run_live.py --testnet --symbols BTCUSDT,ETHUSDT
+
+# 8 assets (backtested set)
+uv run python run_live.py --testnet \
+  --symbols BTCUSDT,ETHUSDT,DOGEUSDT,TRXUSDT,SOLUSDT,ADAUSDT,AVAXUSDT,UNIUSDT
+
+# Altcoin focus
+uv run python run_live.py --testnet --symbols DOGEUSDT,SOLUSDT,ADAUSDT
+```
+
+All 8 backtested assets (BTC, ETH, DOGE, TRX, SOL, ADA, AVAX, UNI) trade by default if `--symbols` is omitted. You can use any Bybit USDT spot pair, but only the 8 above have verified backtest data.
+
+### Command Line Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--testnet` | off | Use Bybit testnet (paper trading) |
+| `--symbols` | all 8 assets | Comma-separated USDT pairs |
+| `--capital` | 10000 | Initial capital in USDT |
+| `--risk` | 0.03 | Risk per trade (fraction of capital) |
+| `--max-positions` | 2 | Max concurrent positions per symbol |
+
+### Stopping
+
+Press `Ctrl+C` for graceful shutdown. The bot will:
+1. Cancel all pending orders
+2. Save positions to SQLite
+3. Keep open positions on the exchange (they're real positions)
+4. Exit cleanly
+
+On restart, positions are restored from the database and reconciled with the exchange.
+
+### Monitoring & Debugging
+
+All state is in `data/live_trading.db`. See [README_DEBUG.md](README_DEBUG.md) for 30+ SQL queries to analyze slippage, signal quality, execution quality, and compare live vs backtest performance.
 
 ## Backtest Results
 
@@ -120,6 +208,15 @@ src/
 ├── core/
 │   ├── db/datastore.py    # SQLite candle storage
 │   └── models/            # Signal, Position, Candle, Order models
+├── execution/             # Live order execution
+│   ├── exchange_client.py # ccxt Bybit authenticated client
+│   ├── order_manager.py   # Limit-order-first placement + fill tracking
+│   └── slippage_guard.py  # Pre-trade orderbook analysis + adaptive sizing
+├── live/                  # Live trading loop
+│   ├── trader.py          # Main async loop (mirrors backtest engine)
+│   ├── state_manager.py   # SQLite persistence for positions/orders/trades
+│   ├── candle_feed.py     # 5m candle provider (ccxt + REST fallback)
+│   └── pnl_tracker.py     # Equity snapshots + trade PnL recording
 ├── ml/
 │   ├── h1_model.py        # 1h LSTM trend confirmation
 │   └── forecasting.py     # Holt-Winters volatility forecast
@@ -315,7 +412,7 @@ asyncio.run(fetch())
 
 ## Requirements
 
-- Python 3.12+
-- SQLite3 (for candle data)
-- ccxt (for data fetching)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
+- Python 3.10+ (managed automatically by `uv`)
+- Bybit account with API keys (for live trading only)
 - See `pyproject.toml` for full dependencies

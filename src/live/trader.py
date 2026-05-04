@@ -104,8 +104,8 @@ class LiveTrader:
         self._state_manager = StateManager()
         await self._state_manager.init_db()
 
-        self._exchange_client = ExchangeClient(cfg.api_key, cfg.api_secret)
-        await self._exchange_client.initialize()
+        self._exchange_client = ExchangeClient(cfg.api_key, cfg.api_secret, testnet=cfg.testnet)
+        await self._exchange_client.start()
 
         self._slippage_guard = SlippageGuard(
             self._exchange_client,
@@ -157,6 +157,9 @@ class LiveTrader:
 
         if self._state_manager:
             await self._state_manager.close()
+
+        if self._exchange_client:
+            await self._exchange_client.stop()
 
         log.info("live_trader.stopped", open_positions=len(self._positions))
 

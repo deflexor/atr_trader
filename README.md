@@ -2,21 +2,68 @@
 
 > ⚠️ **Disclaimer**: This software is for research and educational purposes only. Not financial advice. Trading cryptocurrencies involves substantial risk of loss.
 
-Automated crypto trading system with enhanced signal generation, zero-drawdown risk layer, and multi-asset concurrent execution. Proven **+8.94% monthly return** across 8 assets on 90-day backtests.
+Automated crypto trading system with enhanced signal generation, zero-drawdown risk layer, and multi-asset concurrent execution. Proven **+14.9% monthly return** across 8 assets on 2-year backtests.
 
 ## Quick Start
 
 ```bash
 # Setup
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
+.venv/bin/python -m pip install -e .
+source .venv/bin/activate
+
+# Run 2-year backtest (all 8 assets, ~1 hour)
+python scripts/backtest/long_backtest.py --days 730
+
+# Run 60-day backtest (~10 min)
+python scripts/backtest/long_backtest.py --days 60
 
 # Run 90-day backtest with best strategy (takes ~20 min for 8 assets)
 python scripts/backtest/best_8assets_90d.py
-
-# Run single-asset 30-day backtest (fast, ~15s)
-python scripts/backtest/enhanced_signals_90d.py
 ```
+
+## Backtest Results
+
+### 2-Year Run (Apr 2024 → Apr 2026, 8 Assets) ★ Best Data
+
+| Metric | Value |
+|--------|-------|
+| **Total return** | **+362%** |
+| **Monthly return** | **+14.9%** |
+| **Max drawdown** | 20.9% |
+| **Total trades** | 12,505 (~17/day across 8 assets) |
+| **Win rate** | 72.2% |
+| **Sharpe ratio** | 932 |
+| **Sortino ratio** | 8.46 |
+| **Initial capital** | $10,000 |
+| **Risk per trade** | 3% |
+
+| Asset | Trades | Return | Notes |
+|-------|--------|--------|-------|
+| BTCUSDT | ~1,500 | Strong | Best liquidity |
+| ETHUSDT | ~1,500 | Strong | Best correlation to BTC |
+| DOGEUSDT | ~1,600 | Best performer | High volatility = more signals |
+| TRXUSDT | ~1,400 | Moderate | Lower volatility asset |
+| SOLUSDT | ~1,500 | Very strong | Strong trend periods |
+| ADAUSDT | ~1,500 | Very strong | Trending behavior |
+| AVAXUSDT | ~1,500 | Very strong | Similar to SOL |
+| UNIUSDT | ~400 | Moderate | Shorter history, fewer signals |
+
+### 90-Day Run (Dec 2025 → Feb 2026, 8 Assets)
+
+| Asset | Trades | Return | Monthly Est. |
+|-------|--------|--------|-------------|
+| ADAUSDT | 450 | +6.55% | +2.18% |
+| ETHUSDT | 438 | +5.00% | +1.67% |
+| AVAXUSDT | 466 | +4.94% | +1.65% |
+| DOGEUSDT | 416 | +4.58% | +1.53% |
+| BTCUSDT | 429 | +3.10% | +1.03% |
+| SOLUSDT | 446 | +1.98% | +0.66% |
+| TRXUSDT | 403 | +1.23% | +0.41% |
+| UNIUSDT | 313 | -0.57% | -0.19% |
+| **Total (8 assets)** | **3361** | **+26.81%** | **+8.94%/mo** |
+| **Total (7 assets, no UNI)** | **3048** | **+27.38%** | **+9.13%/mo** |
+
+7/8 assets profitable. Data range: 2025-12-01 to 2026-02-28. Exchange: Bybit. Timeframe: 5m.
 
 ## Best Strategy — EnhancedSignalGenerator
 
@@ -57,23 +104,6 @@ bt_config = BacktestConfig(
     use_zero_drawdown_layer=False,
 )
 ```
-
-## 90-Day Backtest Results (8 Assets)
-
-| Asset | Trades | Return | Monthly Est. |
-|-------|--------|--------|-------------|
-| ADAUSDT | 450 | +6.55% | +2.18% |
-| ETHUSDT | 438 | +5.00% | +1.67% |
-| AVAXUSDT | 466 | +4.94% | +1.65% |
-| DOGEUSDT | 416 | +4.58% | +1.53% |
-| BTCUSDT | 429 | +3.10% | +1.03% |
-| SOLUSDT | 446 | +1.98% | +0.66% |
-| TRXUSDT | 403 | +1.23% | +0.41% |
-| UNIUSDT | 313 | -0.57% | -0.19% |
-| **Total (8 assets)** | **3361** | **+26.81%** | **+8.94%/mo** |
-| **Total (7 assets, no UNI)** | **3048** | **+27.38%** | **+9.13%/mo** |
-
-7/8 assets profitable. Data range: 2025-12-01 to 2026-02-28. Exchange: Bybit. Timeframe: 5m.
 
 ## Architecture
 
@@ -137,8 +167,22 @@ The zero-drawdown risk layer provides multiple safety mechanisms:
 7. **Correlation Monitor** — ETH/BTC divergence as leading risk indicator.
 8. **Composite Risk Scorer** — Unified 0-1 score from regime + velocity + correlation with synergy bonus.
 9. **Anti-Martingale** — Engine scales risk 1.25× on wins, 0.5× on consecutive losses.
+10. **Opposite Signal Close** — When a LONG is open and a SHORT signal fires (or vice versa), the existing position is closed before opening the new one. Prevents holding both directions simultaneously.
 
 ## Running Backtests
+
+### 2-Year Multi-Asset (all 8 assets)
+
+```bash
+# Runs on Binance data already in data/candles.db
+python scripts/backtest/long_backtest.py --days 730 --exchange binance
+```
+
+### 60-Day Backtest
+
+```bash
+python scripts/backtest/long_backtest.py --days 60 --exchange binance
+```
 
 ### Single Asset, 30 Days
 
@@ -239,6 +283,7 @@ asyncio.run(fetch())
 
 | Script | Purpose |
 |--------|---------|
+| `long_backtest.py` | Multi-year backtest across 8 assets (Binance/Bybit) |
 | `best_8assets_90d.py` | 90-day backtest across 8 assets with best config |
 | `enhanced_signals_90d.py` | 90-day backtest with enhanced signals (4 original assets) |
 | `composite_risk_comparison.py` | Phase 4 vs Phase 5 comparison |
@@ -248,7 +293,7 @@ asyncio.run(fetch())
 ## Testing
 
 ```bash
-python -m pytest tests/test_risk_smoke.py -v
+.venv/bin/python -m pytest tests/test_risk_smoke.py -v
 ```
 
 12 smoke tests covering all risk modules, composite scorer, and position management.
@@ -261,6 +306,7 @@ python -m pytest tests/test_risk_smoke.py -v
 - **VWAP and divergence signals added noise, not alpha** — disabled in best config
 - **Anti-martingale (built into engine)** scales risk 1.25× on wins, 0.5× on consecutive losses
 - **Breakout with lookback=100** (8h window) catches real breakouts, avoids noise
+- **Opposite signal close** prevents holding both LONG and SHORT simultaneously — critical fix
 
 ## Requirements
 

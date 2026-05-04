@@ -893,7 +893,22 @@ class BacktestEngine:
         is_long = signal.direction == SignalDirection.LONG
         side_str = "long" if is_long else "short"
 
-        # Check if we already have a position in this direction
+        # Close opposite positions when signal direction changes
+        # e.g. holding LONG and SHORT signal fires → close LONG first
+        opposite_side = "short" if is_long else "long"
+        opposite_position = next(
+            (p for p in self.positions if p.side == opposite_side),
+            None,
+        )
+        if opposite_position is not None:
+            self._close_position(
+                opposite_position,
+                candle.close,
+                candle.volume,
+                "opposite_signal",
+            )
+
+        # Check for same-direction position (for pyramiding)
         existing = next(
             (p for p in self.positions if p.side == side_str),
             None,

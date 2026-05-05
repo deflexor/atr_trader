@@ -178,6 +178,7 @@ class CandleFeed:
 
     async def wait_for_candle(
         self, symbol: str, timeout: float = 310,
+        shutdown_event: Optional[asyncio.Event] = None,
     ) -> Optional[CandleSeries]:
         """Poll every 10s until a new candle arrives or timeout.
 
@@ -188,10 +189,20 @@ class CandleFeed:
         elapsed = 0.0
 
         while elapsed < timeout:
+            if shutdown_event and shutdown_event.is_set():
+                return None
             series = await self.update_candles(symbol)
             if series is not None:
                 return series
-            await asyncio.sleep(poll_interval)
+            try:
+                await asyncio.wait_for(
+                    shutdown_event.wait() if shutdown_event else asyncio.sleep(poll_interval),
+                    timeout=poll_interval,
+                )
+                # Event was set → shutting down
+                return None
+            except asyncio.TimeoutError:
+                pass
             elapsed += poll_interval
 
         self._log.warning("wait_timeout", symbol=symbol, timeout=timeout)

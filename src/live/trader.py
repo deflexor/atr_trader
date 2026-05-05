@@ -35,6 +35,7 @@ class LiveTradingConfig:
 
     api_key: str = ""
     api_secret: str = ""
+    testnet: bool = False
     symbols: list[str] = field(default_factory=lambda: [
         "BTCUSDT", "ETHUSDT", "DOGEUSDT", "TRXUSDT",
         "SOLUSDT", "ADAUSDT", "AVAXUSDT", "UNIUSDT",
@@ -146,6 +147,8 @@ class LiveTrader:
     async def stop(self) -> None:
         """Graceful shutdown: save state, keep positions on exchange."""
         self._running = False
+        if hasattr(self, "_shutdown_event"):
+            self._shutdown_event.set()
         log = logger.bind(action="stop")
         log.info("live_trader.stopping")
 
@@ -168,18 +171,25 @@ class LiveTrader:
     async def run(self) -> None:
         """Main trading loop — process all symbols in parallel."""
         self._running = True
+        self._shutdown_event = asyncio.Event()
         log = logger.bind(action="run")
         log.info("live_trader.started", symbols=self.config.symbols)
 
         while self._running:
             tasks = [self._process_symbol(s) for s in self.config.symbols]
             await asyncio.gather(*tasks)
-            await asyncio.sleep(10)
+            # Interruptible sleep — wakes immediately on shutdown
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                pass
 
     async def _process_symbol(self, symbol: str) -> None:
         """Process one symbol: wait for candle, update, signal."""
         try:
-            series = await self._candle_feed.wait_for_candle(symbol)
+            series = await self._candle_feed.wait_for_candle(
+                symbol, shutdown_event=getattr(self, "_shutdown_event", None),
+            )
             if series is None:
                 return
 

@@ -59,6 +59,7 @@ def main() -> None:
     config = LiveTradingConfig(
         api_key=api_key,
         api_secret=api_secret,
+        testnet=args.testnet,
         symbols=symbols if symbols is not None else LiveTradingConfig.symbols,
         initial_capital=args.capital,
         risk_per_trade=args.risk,

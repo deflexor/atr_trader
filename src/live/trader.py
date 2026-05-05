@@ -36,6 +36,8 @@ class LiveTradingConfig:
     api_key: str = ""
     api_secret: str = ""
     testnet: bool = False
+    market_type: str = "perp"
+    leverage: int = 1
     symbols: list[str] = field(default_factory=lambda: [
         "BTCUSDT", "ETHUSDT", "DOGEUSDT", "TRXUSDT",
         "SOLUSDT", "ADAUSDT", "AVAXUSDT", "UNIUSDT",
@@ -105,8 +107,21 @@ class LiveTrader:
         self._state_manager = StateManager()
         await self._state_manager.init_db()
 
-        self._exchange_client = ExchangeClient(cfg.api_key, cfg.api_secret, testnet=cfg.testnet)
+        self._exchange_client = ExchangeClient(
+            cfg.api_key, cfg.api_secret,
+            testnet=cfg.testnet,
+            market_type=cfg.market_type,
+            leverage=cfg.leverage,
+        )
         await self._exchange_client.start()
+
+        # Configure each symbol for perpetual trading
+        if cfg.market_type == "perp":
+            for symbol in cfg.symbols:
+                try:
+                    await self._exchange_client.setup_perp_symbol(symbol)
+                except Exception as exc:
+                    log.warning("perp_setup_failed", symbol=symbol, error=str(exc))
 
         self._slippage_guard = SlippageGuard(
             self._exchange_client,
@@ -130,6 +145,7 @@ class LiveTrader:
             symbols=cfg.symbols,
             timeframe=cfg.timeframe,
             lookback_candles=cfg.lookback_candles,
+            market_type=cfg.market_type,
         )
         await self._candle_feed.initialize()
 
@@ -144,8 +160,22 @@ class LiveTrader:
             open_positions=len(self._positions),
         )
 
+    async def signal_shutdown(self) -> None:
+        """Signal the main loop to exit. Safe to call from any context.
+
+        Does NOT close resources — that's stop()'s job after run() returns.
+        """
+        self._running = False
+        if hasattr(self, "_shutdown_event"):
+            self._shutdown_event.set()
+        logger.info("live_trader.shutdown_signaled")
+
     async def stop(self) -> None:
-        """Graceful shutdown: save state, keep positions on exchange."""
+        """Graceful shutdown: save state, close resources.
+
+        Call AFTER run() has returned. The signal handler should call
+        signal_shutdown(), not this method.
+        """
         self._running = False
         if hasattr(self, "_shutdown_event"):
             self._shutdown_event.set()

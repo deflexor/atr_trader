@@ -44,12 +44,14 @@ class CandleFeed:
         symbols: list[str],
         timeframe: str = "5m",
         lookback_candles: int = 200,
+        market_type: str = "perp",
     ) -> None:
         self._exchange = exchange_client
         self._state = state_manager
         self._symbols = symbols
         self._timeframe = timeframe
         self._lookback = lookback_candles
+        self._market_type = market_type
         self._buffers: dict[str, list[Candle]] = {}
         self._series: dict[str, CandleSeries] = {}
         self._log = logger.bind(component="candle_feed")
@@ -101,7 +103,7 @@ class CandleFeed:
     ) -> list[list]:
         """Call ccxt fetch_ohlcv through the ExchangeClient."""
         exchange = self._exchange._exchange  # ccxt instance
-        ccxt_symbol = self._normalize(symbol)
+        ccxt_symbol = _normalize(symbol, self._market_type)
         return await exchange.fetch_ohlcv(
             ccxt_symbol,
             self._timeframe,
@@ -110,12 +112,15 @@ class CandleFeed:
         )
 
     @staticmethod
-    def _normalize(symbol: str) -> str:
-        """Convert raw symbol to ccxt format: BTCUSDT -> BTC/USDT."""
+    def _normalize(symbol: str, market_type: str = "perp") -> str:
+        """Convert raw symbol to ccxt format: BTCUSDT -> BTC/USDT:USDT."""
         clean = symbol.upper().strip()
-        if "/" in clean:
+        if ":" in clean:
             return clean
-        return f"{clean.rstrip('USDT')}/USDT"
+        base = clean.split("/")[0] if "/" in clean else clean.rstrip("USDT")
+        if market_type == "perp":
+            return f"{base}/USDT:USDT"
+        return f"{base}/USDT"
 
     # ── live updates ───────────────────────────────────────────
 
@@ -128,7 +133,7 @@ class CandleFeed:
         """
         try:
             exchange = self._exchange._exchange
-            ccxt_symbol = self._normalize(symbol)
+            ccxt_symbol = self._normalize(symbol, self._market_type)
             rows = await exchange.fetch_ohlcv(
                 ccxt_symbol, self._timeframe, limit=2,
             )

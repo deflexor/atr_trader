@@ -411,12 +411,14 @@ class OrderManager:
     # ── exit flow (private) ──────────────────────────────────────
 
     async def _execute_market_order(self, order_dict: dict) -> OrderResult:
-        """Execute a market order for exits."""
+        """Execute a market order for exits (reduceOnly on perps)."""
         symbol = order_dict["symbol"]
         side = order_dict["side"]
         quantity = order_dict["quantity"]
 
-        result = await self._client.place_market_order(symbol, side, quantity)
+        result = await self._client.place_market_order(
+            symbol, side, quantity, reduce_only=True
+        )
 
         order_id = result["order_id"]
         order_dict["id"] = order_id

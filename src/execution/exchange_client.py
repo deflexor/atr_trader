@@ -1,4 +1,4 @@
-"""Authenticated Bybit exchange client for order execution."""
+"""Authenticated Bybit exchange client for order execution (USDT perpetuals)."""
 from __future__ import annotations
 
 import asyncio
@@ -19,15 +19,21 @@ class ExchangeError(Exception):
     pass
 
 
-def _normalize_symbol(symbol: str) -> str:
-    """Convert raw symbol to ccxt format.
+def _normalize_symbol(symbol: str, market_type: str = "perp") -> str:
+    """Convert raw symbol to ccxt unified format.
 
-    "BTCUSDT" or "BTC/USDT" → "BTC/USDT"
+    market_type="perp" (default):
+        "BTCUSDT" or "BTC/USDT" → "BTC/USDT:USDT"
+    market_type="spot":
+        "BTCUSDT" or "BTC/USDT" → "BTC/USDT"
     """
     clean = symbol.upper().strip()
-    if "/" in clean:
-        return clean
-    return f"{clean.rstrip('USDT')}/USDT"
+    if ":" in clean:
+        return clean  # Already fully qualified
+    base = clean.split("/")[0] if "/" in clean else clean.rstrip("USDT")
+    if market_type == "perp":
+        return f"{base}/USDT:USDT"
+    return f"{base}/USDT"
 
 
 def _with_retry(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -56,10 +62,15 @@ def _with_retry(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 class ExchangeClient:
-    """Authenticated Bybit client via ccxt.pro for order execution."""
+    """Authenticated Bybit client via ccxt.pro for USDT perpetual trading."""
 
     def __init__(
-        self, api_key: str, api_secret: str, testnet: bool = False
+        self,
+        api_key: str,
+        api_secret: str,
+        testnet: bool = False,
+        market_type: str = "perp",
+        leverage: int = 1,
     ) -> None:
         self._exchange = ccxtpro.bybit(
             {
@@ -69,6 +80,8 @@ class ExchangeClient:
                 "enableRateLimit": True,
             }
         )
+        self._market_type = market_type
+        self._leverage = leverage
         self._log = logger.bind(component="exchange_client")
 
     # ── lifecycle ──────────────────────────────────────────────
@@ -77,9 +90,53 @@ class ExchangeClient:
         """Initialize exchange connection, load markets."""
         try:
             await self._exchange.load_markets()
-            self._log.info("exchange_started", markets=len(self._exchange.markets))
+            self._log.info(
+                "exchange_started",
+                markets=len(self._exchange.markets),
+                market_type=self._market_type,
+                leverage=self._leverage,
+            )
         except ccxtpro.BaseError as exc:
             raise ExchangeError(f"start failed: {exc}") from exc
+
+    async def setup_perp_symbol(self, symbol: str) -> None:
+        """Configure a symbol for USDT perpetual trading.
+
+        Order matters: position_mode → margin_mode → leverage.
+        Idempotent — safe to call on every startup.
+        """
+        if self._market_type != "perp":
+            return
+
+        ccxt_symbol = _normalize_symbol(symbol, "perp")
+        lev = str(self._leverage)
+        log = self._log.bind(symbol=ccxt_symbol, leverage=lev)
+
+        try:
+            # 1. One-way position mode (not hedge)
+            await self._exchange.set_position_mode(False, ccxt_symbol)
+            log.debug("position_mode_set", mode="one_way")
+        except ccxtpro.BaseError as exc:
+            log.warning("position_mode_failed", error=str(exc))
+
+        try:
+            # 2. Isolated margin (Bybit requires leverage param here)
+            await self._exchange.set_margin_mode(
+                "isolated", ccxt_symbol, {"leverage": lev}
+            )
+            log.debug("margin_mode_set", mode="isolated")
+        except ccxtpro.BaseError as exc:
+            # "not modified" is fine — already in isolated mode
+            if "not modified" not in str(exc).lower():
+                log.warning("margin_mode_failed", error=str(exc))
+
+        try:
+            # 3. Set leverage
+            await self._exchange.set_leverage(self._leverage, ccxt_symbol)
+            log.info("perp_configured", leverage=self._leverage)
+        except ccxtpro.BaseError as exc:
+            if "not modified" not in str(exc).lower():
+                log.warning("leverage_set_failed", error=str(exc))
 
     async def stop(self) -> None:
         """Clean up exchange connection."""
@@ -93,15 +150,26 @@ class ExchangeClient:
 
     @_with_retry
     async def place_limit_order(
-        self, symbol: str, side: str, quantity: float, price: float
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        reduce_only: bool = False,
     ) -> dict:
         """Place a limit order. Returns {order_id, status, price, quantity}."""
-        ccxt_symbol = _normalize_symbol(symbol)
+        ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         precise_price = self._exchange.price_to_precision(ccxt_symbol, price)
         precise_qty = self._exchange.amount_to_precision(ccxt_symbol, quantity)
+        params = {"reduceOnly": reduce_only} if reduce_only else {}
         try:
             result = await self._exchange.create_order(
-                ccxt_symbol, "limit", side, float(precise_qty), float(precise_price)
+                ccxt_symbol,
+                "limit",
+                side,
+                float(precise_qty),
+                float(precise_price),
+                params,
             )
             self._log.info(
                 "limit_order_placed",
@@ -110,6 +178,7 @@ class ExchangeClient:
                 price=precise_price,
                 quantity=precise_qty,
                 order_id=result["id"],
+                reduce_only=reduce_only,
             )
             return self._extract_order(result)
         except ccxtpro.BaseError as exc:
@@ -119,14 +188,19 @@ class ExchangeClient:
 
     @_with_retry
     async def place_market_order(
-        self, symbol: str, side: str, quantity: float
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        reduce_only: bool = False,
     ) -> dict:
         """Place a market order. Returns {order_id, status, avg_fill_price, quantity}."""
-        ccxt_symbol = _normalize_symbol(symbol)
+        ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         precise_qty = self._exchange.amount_to_precision(ccxt_symbol, quantity)
+        params = {"reduceOnly": reduce_only} if reduce_only else {}
         try:
             result = await self._exchange.create_order(
-                ccxt_symbol, "market", side, float(precise_qty)
+                ccxt_symbol, "market", side, float(precise_qty), None, params
             )
             self._log.info(
                 "market_order_placed",
@@ -134,6 +208,7 @@ class ExchangeClient:
                 side=side,
                 quantity=precise_qty,
                 order_id=result["id"],
+                reduce_only=reduce_only,
             )
             return self._extract_order(result)
         except ccxtpro.BaseError as exc:
@@ -146,7 +221,7 @@ class ExchangeClient:
     @_with_retry
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel an open order. Returns True on success (idempotent)."""
-        ccxt_symbol = _normalize_symbol(symbol)
+        ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         try:
             order = await self._exchange.fetch_order(order_id, ccxt_symbol)
             if order["status"] in ("closed", "filled", "canceled"):
@@ -194,7 +269,7 @@ class ExchangeClient:
     @_with_retry
     async def fetch_open_orders(self, symbol: str) -> list[dict]:
         """Fetch open orders for symbol. Returns [{id, side, price, quantity, status}]."""
-        ccxt_symbol = _normalize_symbol(symbol)
+        ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         try:
             orders = await self._exchange.fetch_open_orders(ccxt_symbol)
             return [
@@ -215,7 +290,7 @@ class ExchangeClient:
     @_with_retry
     async def fetch_order_status(self, symbol: str, order_id: str) -> dict:
         """Fetch order status. Returns {status, filled, avg_fill_price}."""
-        ccxt_symbol = _normalize_symbol(symbol)
+        ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         try:
             order = await self._exchange.fetch_order(order_id, ccxt_symbol)
             return {
@@ -233,7 +308,7 @@ class ExchangeClient:
     @_with_retry
     async def fetch_orderbook(self, symbol: str, limit: int = 10) -> dict:
         """Fetch order book. Returns {bids: [[price, qty]], asks: [[price, qty]]}."""
-        ccxt_symbol = _normalize_symbol(symbol)
+        ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         try:
             book = await self._exchange.fetch_order_book(ccxt_symbol, limit)
             return {"bids": book["bids"], "asks": book["asks"]}
@@ -245,7 +320,7 @@ class ExchangeClient:
     @_with_retry
     async def fetch_ticker(self, symbol: str) -> dict:
         """Fetch current ticker. Returns {bid, ask, last, high, low, volume}."""
-        ccxt_symbol = _normalize_symbol(symbol)
+        ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         try:
             t = await self._exchange.fetch_ticker(ccxt_symbol)
             return {
@@ -260,6 +335,26 @@ class ExchangeClient:
             raise ExchangeError(
                 f"fetch_ticker failed for {ccxt_symbol}: {exc}"
             ) from exc
+
+    @_with_retry
+    async def fetch_funding_rate(self, symbol: str) -> dict:
+        """Fetch current funding rate for a perpetual symbol.
+
+        Returns {rate, next_rate, next_time} or empty dict on error.
+        """
+        ccxt_symbol = _normalize_symbol(symbol, self._market_type)
+        try:
+            fr = await self._exchange.fetch_funding_rate(ccxt_symbol)
+            return {
+                "rate": fr.get("fundingRate"),
+                "next_rate": fr.get("nextFundingRate"),
+                "next_time": fr.get("nextFundingDatetime"),
+            }
+        except ccxtpro.BaseError as exc:
+            self._log.warning(
+                "fetch_funding_rate_failed", symbol=ccxt_symbol, error=str(exc)
+            )
+            return {}
 
     # ── helpers ────────────────────────────────────────────────
 

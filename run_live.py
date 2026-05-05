@@ -18,7 +18,7 @@ logger = structlog.get_logger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="PyPSiK live trading")
+    parser = argparse.ArgumentParser(description="PyPSiK live trading (USDT perpetuals)")
     parser.add_argument("--testnet", action="store_true", help="Use Bybit testnet")
     parser.add_argument(
         "--symbols",
@@ -29,6 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capital", type=float, default=10000.0, help="Initial capital")
     parser.add_argument("--risk", type=float, default=0.03, help="Risk per trade (fraction)")
     parser.add_argument("--max-positions", type=int, default=2, help="Max positions per symbol")
+    parser.add_argument(
+        "--leverage", type=int, default=1, help="Leverage (default: 1 = no leverage)"
+    )
+    parser.add_argument(
+        "--market-type",
+        choices=["perp", "spot"],
+        default="perp",
+        help="Market type: perp (default) or spot",
+    )
     return parser
 
 
@@ -60,6 +69,8 @@ def main() -> None:
         api_key=api_key,
         api_secret=api_secret,
         testnet=args.testnet,
+        market_type=args.market_type,
+        leverage=args.leverage,
         symbols=symbols if symbols is not None else LiveTradingConfig.symbols,
         initial_capital=args.capital,
         risk_per_trade=args.risk,
@@ -72,6 +83,8 @@ def main() -> None:
         capital=config.initial_capital,
         risk=config.risk_per_trade,
         max_positions=config.max_positions,
+        market_type=config.market_type,
+        leverage=config.leverage,
         testnet=args.testnet,
     )
 
@@ -83,7 +96,9 @@ async def _run(config: LiveTradingConfig) -> None:
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.ensure_future(trader.stop()))
+        loop.add_signal_handler(
+            sig, lambda: asyncio.ensure_future(trader.signal_shutdown())
+        )
 
     try:
         await trader.start()

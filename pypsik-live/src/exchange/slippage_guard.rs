@@ -167,6 +167,43 @@ impl SlippageGuard {
         slippage_pct
     }
 
+    /// Average slippage over last N trades. 0.0 if no data.
+    pub fn get_rolling_avg_slippage(&self, symbol: &str) -> f64 {
+        let history = self.slippage_history.get(symbol);
+        match history {
+            Some(h) if !h.is_empty() => h.iter().sum::<f64>() / h.len() as f64,
+            _ => 0.0,
+        }
+    }
+
+    /// Position size multiplier based on rolling slippage.
+    pub fn get_size_multiplier(&self, symbol: &str) -> f64 {
+        let avg = self.get_rolling_avg_slippage(symbol);
+        if avg <= 0.05 {
+            return 1.0;
+        }
+        if avg > 0.08 {
+            return (0.25_f64).max(0.08 / avg);
+        }
+        1.0
+    }
+
+    /// True if last N spread checks all exceeded max_spread_pct.
+    pub fn is_blacklisted(&self, symbol: &str) -> bool {
+        let history = self.spread_history.get(symbol);
+        match history {
+            Some(h) if h.len() >= self.blacklist_threshold => {
+                let recent: Vec<&f64> = h.iter().rev().take(self.blacklist_threshold).collect();
+                if recent.iter().all(|s| **s > self.max_spread_pct) {
+                    tracing::warn!(symbol = symbol, "symbol_blacklisted");
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn reject(
         &self,
         symbol: &str,

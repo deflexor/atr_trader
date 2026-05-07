@@ -443,6 +443,63 @@ impl ExchangeClient {
         Ok(resp["result"].clone())
     }
 
+    /// Fetch open orders for a symbol.
+    pub async fn fetch_open_orders(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<OpenOrder>, ExchangeError> {
+        let api_symbol = normalize_symbol(symbol, &self.market_type);
+        let params = vec![
+            ("category".to_string(), "linear".to_string()),
+            ("symbol".to_string(), api_symbol),
+        ];
+
+        let resp = self.get_private("/v5/order/realtime", &params).await?;
+        let list = resp["result"]["list"].as_array().cloned().unwrap_or_default();
+
+        let orders: Vec<OpenOrder> = list
+            .into_iter()
+            .filter_map(|o| {
+                let qty: f64 = o["qty"].as_str().and_then(|s| s.parse().ok())?;
+                Some(OpenOrder {
+                    id: o["orderId"].as_str().unwrap_or("").to_string(),
+                    side: o["side"].as_str().unwrap_or("").to_string().to_lowercase(),
+                    price: o["price"].as_str().and_then(|s| s.parse().ok()),
+                    quantity: qty,
+                    status: o["orderStatus"].as_str().unwrap_or("Unknown").to_string(),
+                })
+            })
+            .collect();
+
+        Ok(orders)
+    }
+
+    /// Fetch current funding rate for a perpetual symbol.
+    pub async fn fetch_funding_rate(
+        &self,
+        symbol: &str,
+    ) -> Result<FundingRate, ExchangeError> {
+        let api_symbol = normalize_symbol(symbol, &self.market_type);
+        let params = vec![
+            ("category".to_string(), "linear".to_string()),
+            ("symbol".to_string(), api_symbol),
+        ];
+
+        let resp = self.get_public("/v5/market/funding/history", &params).await?;
+        let list = resp["result"]["list"].as_array();
+
+        match list.and_then(|l| l.first()) {
+            Some(fr) => Ok(FundingRate {
+                rate: fr["fundingRate"].as_str().and_then(|s| s.parse().ok()),
+                next_time: fr["fundingRateTimestamp"].as_str().map(|s| s.to_string()),
+            }),
+            None => Ok(FundingRate {
+                rate: None,
+                next_time: None,
+            }),
+        }
+    }
+
     /// Fetch open exchange positions for reconciliation.
     pub async fn fetch_exchange_positions(
         &self,
@@ -642,6 +699,23 @@ pub struct ExchangePosition {
     pub quantity: f64,
     pub entry_price: f64,
     pub unrealized_pnl: f64,
+}
+
+/// Open order from the exchange.
+#[derive(Debug, Clone)]
+pub struct OpenOrder {
+    pub id: String,
+    pub side: String,
+    pub price: Option<f64>,
+    pub quantity: f64,
+    pub status: String,
+}
+
+/// Funding rate data.
+#[derive(Debug, Clone)]
+pub struct FundingRate {
+    pub rate: Option<f64>,
+    pub next_time: Option<String>,
 }
 
 /// Normalize a raw symbol to Bybit V5 API format.

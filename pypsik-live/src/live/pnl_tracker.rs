@@ -98,6 +98,63 @@ impl PnlTracker {
     pub fn reset_daily(&mut self, equity: f64) {
         self.daily_start_equity = equity;
     }
+
+    /// Log daily performance summary.
+    pub fn log_daily_summary(&self, positions: &[Position], cash: f64) {
+        let upnl: f64 = positions.iter().map(|p| p.unrealized_pnl()).sum();
+        let total_equity = cash + upnl;
+        let daily_pnl = total_equity - self.daily_start_equity;
+        let win_rate = if self.trade_count > 0 {
+            self.win_count as f64 / self.trade_count as f64
+        } else {
+            0.0
+        };
+
+        tracing::info!(
+            total_equity = format!("{:.2}", total_equity),
+            daily_pnl = format!("{:.2}", daily_pnl),
+            win_rate = format!("{:.4}", win_rate),
+            trades = self.trade_count,
+            open_positions = positions.len(),
+            "daily_summary"
+        );
+    }
+
+    /// Return performance statistics dict.
+    pub fn get_performance_stats(&self) -> serde_json::Value {
+        let win_rate = if self.trade_count > 0 {
+            self.win_count as f64 / self.trade_count as f64
+        } else {
+            0.0
+        };
+        let avg_pnl = if self.trade_count > 0 {
+            self.total_pnl / self.trade_count as f64
+        } else {
+            0.0
+        };
+
+        serde_json::json!({
+            "total_trades": self.trade_count,
+            "win_rate": win_rate,
+            "avg_pnl": avg_pnl,
+            "total_pnl": self.total_pnl,
+            "sharpe_approximation": sharpe_approx(&self.trade_pnls),
+        })
+    }
+}
+
+/// Simplified Sharpe: mean / std, annualized by sqrt(252).
+fn sharpe_approx(pnls: &[f64]) -> f64 {
+    if pnls.len() < 2 {
+        return 0.0;
+    }
+    let n = pnls.len() as f64;
+    let mean = pnls.iter().sum::<f64>() / n;
+    let variance = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / n;
+    if variance == 0.0 {
+        return 0.0;
+    }
+    (mean / variance.sqrt()) * 252.0_f64.sqrt()
 }
 
 /// Calculate raw PnL mirroring backtest engine logic.

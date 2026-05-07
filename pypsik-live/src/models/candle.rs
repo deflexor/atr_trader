@@ -1,4 +1,4 @@
-/// Candle (OHLCV) and CandleSeries models.
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -93,6 +93,63 @@ impl CandleSeries {
     /// Whether the series is empty.
     pub fn is_empty(&self) -> bool {
         self.candles.is_empty()
+    }
+
+    /// Aggregate candles into a higher timeframe.
+    ///
+    /// Supported: "1h" (60min), "4h" (240min), "1d" (1440min).
+    /// Returns a new CandleSeries with aggregated candles.
+    pub fn resample(&self, target_timeframe: &str) -> CandleSeries {
+        let minutes: HashMap<&str, i64> = [
+            ("1h", 60),
+            ("4h", 240),
+            ("1d", 1440),
+        ].into_iter().collect();
+
+        let tf_minutes = match minutes.get(target_timeframe) {
+            Some(m) => *m,
+            None => return CandleSeries {
+                candles: Vec::new(),
+                symbol: self.symbol.clone(),
+                exchange: self.exchange.clone(),
+                timeframe: target_timeframe.to_string(),
+            },
+        };
+
+        let mut groups: BTreeMap<i64, Vec<&Candle>> = BTreeMap::new();
+        for c in &self.candles {
+            let bucket = c.timestamp.timestamp() / (tf_minutes * 60) * (tf_minutes * 60);
+            groups.entry(bucket).or_default().push(c);
+        }
+
+        let aggregated: Vec<Candle> = groups
+            .into_iter()
+            .map(|(bucket_ts, group)| {
+                let first = group[0];
+                let last = *group.last().unwrap();
+                Candle {
+                    symbol: first.symbol.clone(),
+                    exchange: first.exchange.clone(),
+                    timeframe: target_timeframe.to_string(),
+                    timestamp: chrono::DateTime::from_timestamp(bucket_ts, 0)
+                        .unwrap_or_default(),
+                    open: first.open,
+                    high: group.iter().map(|c| c.high).fold(f64::NEG_INFINITY, f64::max),
+                    low: group.iter().map(|c| c.low).fold(f64::INFINITY, f64::min),
+                    close: last.close,
+                    volume: group.iter().map(|c| c.volume).sum(),
+                    quote_volume: group.iter().map(|c| c.quote_volume).sum(),
+                    trades: group.iter().map(|c| c.trades).sum(),
+                }
+            })
+            .collect();
+
+        CandleSeries {
+            candles: aggregated,
+            symbol: self.symbol.clone(),
+            exchange: self.exchange.clone(),
+            timeframe: target_timeframe.to_string(),
+        }
     }
 }
 

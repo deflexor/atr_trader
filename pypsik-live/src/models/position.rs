@@ -142,4 +142,57 @@ impl Position {
             None => false,
         }
     }
+
+    /// Whether the stop loss is triggered.
+    pub fn is_stop_triggered(&self) -> bool {
+        match self.stop_loss {
+            Some(sl) if self.side == "long" => self.current_price <= sl,
+            Some(sl) => self.current_price >= sl,
+            None => false,
+        }
+    }
+
+    /// Whether the take profit is triggered.
+    pub fn is_tp_triggered(&self) -> bool {
+        match self.take_profit {
+            Some(tp) if self.side == "long" => self.current_price >= tp,
+            Some(tp) => self.current_price <= tp,
+            None => false,
+        }
+    }
+
+    /// Remove FIFO entries to reduce position by a fraction.
+    ///
+    /// Returns `(closed_quantity, closed_entry_value)` — quantity and cost basis
+    /// of the removed entries. Used for partial PnL calculation.
+    pub fn reduce_entries(&mut self, fraction: f64) -> (f64, f64) {
+        if fraction <= 0.0 || self.entries.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let total_qty = self.total_quantity();
+        let target_close = total_qty * fraction.min(1.0);
+        let mut closed_qty = 0.0;
+        let mut closed_value = 0.0;
+
+        while target_close - closed_qty > 0.0 && !self.entries.is_empty() {
+            let entry_qty = self.entries[0].quantity;
+            let entry_price = self.entries[0].price;
+            let remaining = target_close - closed_qty;
+
+            if entry_qty <= remaining {
+                self.entries.remove(0);
+                closed_qty += entry_qty;
+                closed_value += entry_qty * entry_price;
+            } else {
+                self.entries[0].quantity = entry_qty - remaining;
+                closed_qty += remaining;
+                closed_value += remaining * entry_price;
+                break;
+            }
+        }
+
+        self.updated_at = chrono::Utc::now();
+        (closed_qty, closed_value)
+    }
 }

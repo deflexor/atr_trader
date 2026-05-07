@@ -297,6 +297,35 @@ impl StateManager {
         Ok(())
     }
 
+    /// Update order fill/status information.
+    pub async fn update_order(
+        &self,
+        order_id: &str,
+        status: &str,
+        filled_quantity: f64,
+        avg_fill_price: Option<f64>,
+        slippage_pct: Option<f64>,
+        commission: f64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let oid = order_id.to_string();
+        let st = status.to_string();
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.blocking_lock();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE orders
+                 SET status = ?1, filled_quantity = ?2, avg_fill_price = ?3,
+                     slippage_pct = ?4, commission = ?5, updated_at = ?6
+                 WHERE id = ?7",
+                rusqlite::params![st, filled_quantity, avg_fill_price, slippage_pct, commission, now, oid],
+            )?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        })
+        .await??;
+        Ok(())
+    }
+
     /// Save a closed trade.
     pub async fn save_trade(
         &self,
@@ -360,6 +389,41 @@ impl StateManager {
         })
         .await??;
         Ok(())
+    }
+
+    /// Get recent equity snapshots for charting.
+    pub async fn get_equity_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+        let db = self.db.clone();
+        let rows = tokio::task::spawn_blocking(move || {
+            let conn = db.blocking_lock();
+            let mut stmt = conn.prepare(
+                "SELECT * FROM equity ORDER BY id DESC LIMIT ?1",
+            )?;
+            let rows: Vec<serde_json::Value> = stmt
+                .query_map(rusqlite::params![limit], |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, i64>("id")?,
+                        "timestamp": row.get::<_, String>("timestamp")?,
+                        "total_equity": row.get::<_, f64>("total_equity")?,
+                        "cash": row.get::<_, f64>("cash")?,
+                        "unrealized_pnl": row.get::<_, f64>("unrealized_pnl")?,
+                        "open_positions": row.get::<_, i32>("open_positions")?,
+                        "daily_pnl": row.get::<_, f64>("daily_pnl")?,
+                        "total_pnl": row.get::<_, f64>("total_pnl")?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            // Reverse to chronological order
+            let mut rows = rows;
+            rows.reverse();
+            Ok::<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>(rows)
+        })
+        .await??;
+        Ok(rows)
     }
 
     /// Get a state value by key.

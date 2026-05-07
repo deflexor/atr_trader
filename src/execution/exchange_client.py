@@ -117,7 +117,8 @@ class ExchangeClient:
             await self._exchange.set_position_mode(False, ccxt_symbol)
             log.debug("position_mode_set", mode="one_way")
         except ccxtpro.BaseError as exc:
-            log.warning("position_mode_failed", error=str(exc))
+            if "not modified" not in str(exc).lower():
+                log.warning("position_mode_failed", error=str(exc))
 
         try:
             # 2. Isolated margin (Bybit requires leverage param here)

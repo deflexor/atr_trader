@@ -103,7 +103,7 @@ class CandleFeed:
     ) -> list[list]:
         """Call ccxt fetch_ohlcv through the ExchangeClient."""
         exchange = self._exchange._exchange  # ccxt instance
-        ccxt_symbol = _normalize(symbol, self._market_type)
+        ccxt_symbol = self._normalize(symbol, self._market_type)
         return await exchange.fetch_ohlcv(
             ccxt_symbol,
             self._timeframe,

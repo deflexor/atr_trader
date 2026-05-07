@@ -291,7 +291,8 @@ class LiveTrader:
 
         opposite_side = "short" if is_long else "long"
         opp = next(
-            (p for p in self._positions.values() if p.side == opposite_side), None,
+            (p for p in self._positions.values()
+             if p.symbol == signal.symbol and p.side == opposite_side), None,
         )
         if opp is not None:
             await self._close_position(opp, candle.close, "opposite_signal", candle, candle_series)

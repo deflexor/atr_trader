@@ -367,6 +367,40 @@ class ExchangeClient:
             )
             return {}
 
+    @_with_retry
+    async def fetch_exchange_positions(self, symbols: list[str]) -> list[dict]:
+        """Fetch open positions from exchange for reconciliation.
+
+        Bybit doesn't accept multiple symbols in one call, so we fetch
+        per-symbol and merge results.
+
+        Returns [{symbol, side, quantity, entry_price, unrealized_pnl}].
+        Symbol is returned in raw format (e.g. 'BTCUSDT').
+        """
+        if self._market_type != "perp":
+            return []
+        ccxt_symbols = [_normalize_symbol(s, "perp") for s in symbols]
+        result = []
+        for ccxt_sym in ccxt_symbols:
+            try:
+                raw_positions = await self._exchange.fetch_positions([ccxt_sym])
+                for p in raw_positions:
+                    if not p or float(p.get("contracts", 0)) <= 0:
+                        continue
+                    raw_symbol = p["symbol"].split("/")[0] + "USDT"
+                    result.append({
+                        "symbol": raw_symbol,
+                        "side": p.get("side", "long"),
+                        "quantity": float(p.get("contracts", 0)),
+                        "entry_price": float(p.get("entryPrice", 0)),
+                        "unrealized_pnl": float(p.get("unrealizedPnl", 0)),
+                    })
+            except ccxtpro.BaseError as exc:
+                self._log.debug(
+                    "fetch_position_symbol_failed", symbol=ccxt_sym, error=str(exc)
+                )
+        return result
+
     # ── helpers ────────────────────────────────────────────────
 
     @staticmethod

@@ -152,6 +152,7 @@ class LiveTrader:
         self._init_risk_layer()
 
         await self._restore_positions()
+        await self._reconcile_positions()
 
         log.info(
             "live_trader.ready",
@@ -602,3 +603,62 @@ class LiveTrader:
                 )
         except Exception as exc:
             logger.warning("restore_positions_failed", error=str(exc))
+
+    async def _reconcile_positions(self) -> None:
+        """Reconcile local state with exchange positions.
+
+        Imports orphan positions from Bybit that aren't in the local DB.
+        This handles cases where orders were placed but fill-polling failed
+        (e.g. the fetchOrder 500-limit error).
+        """
+        if self._exchange_client is None or self._state_manager is None:
+            return
+        if self.config.market_type != "perp":
+            return
+
+        try:
+            exchange_positions = await self._exchange_client.fetch_exchange_positions(
+                self.config.symbols
+            )
+            if not exchange_positions:
+                return
+
+            known_symbols = {
+                p.symbol for p in self._positions.values()
+            }
+
+            imported = []
+            for ep in exchange_positions:
+                if ep["symbol"] in known_symbols:
+                    continue
+                # Skip if a local position already tracks this symbol
+                # (could be different side — both would be new)
+
+                pos = Position(
+                    id=str(uuid.uuid4()),
+                    symbol=ep["symbol"],
+                    exchange="bybit",
+                    side=ep["side"],
+                    current_price=ep["entry_price"],
+                    highest_price=ep["entry_price"] if ep["side"] == "long" else 0.0,
+                    lowest_price=ep["entry_price"] if ep["side"] == "short" else float("inf"),
+                    strategy_id="reconciled",
+                )
+                pos.add_entry(ep["entry_price"], ep["quantity"])
+
+                self._positions[pos.id] = pos
+                self._capital -= pos.cost_basis
+                known_symbols.add(ep["symbol"])
+
+                await self._state_manager.save_position(pos)
+                imported.append(ep)
+
+            if imported:
+                logger.warning(
+                    "positions_reconciled",
+                    count=len(imported),
+                    symbols=[f"{p['symbol']}:{p['side']}" for p in imported],
+                    note="orphaned positions imported from exchange",
+                )
+        except Exception as exc:
+            logger.warning("reconcile_positions_failed", error=str(exc))

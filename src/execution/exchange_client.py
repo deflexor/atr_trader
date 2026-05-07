@@ -162,6 +162,10 @@ class ExchangeClient:
         ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         precise_price = self._exchange.price_to_precision(ccxt_symbol, price)
         precise_qty = self._exchange.amount_to_precision(ccxt_symbol, quantity)
+        if float(precise_qty) <= 0:
+            raise ExchangeError(
+                f"quantity {quantity} rounds to {precise_qty} for {ccxt_symbol}"
+            )
         params = {"reduceOnly": reduce_only} if reduce_only else {}
         try:
             result = await self._exchange.create_order(
@@ -198,6 +202,10 @@ class ExchangeClient:
         """Place a market order. Returns {order_id, status, avg_fill_price, quantity}."""
         ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         precise_qty = self._exchange.amount_to_precision(ccxt_symbol, quantity)
+        if float(precise_qty) <= 0:
+            raise ExchangeError(
+                f"quantity {quantity} rounds to {precise_qty} for {ccxt_symbol}"
+            )
         params = {"reduceOnly": reduce_only} if reduce_only else {}
         try:
             result = await self._exchange.create_order(
@@ -293,7 +301,9 @@ class ExchangeClient:
         """Fetch order status. Returns {status, filled, avg_fill_price}."""
         ccxt_symbol = _normalize_symbol(symbol, self._market_type)
         try:
-            order = await self._exchange.fetch_order(order_id, ccxt_symbol)
+            order = await self._exchange.fetch_order(
+                order_id, ccxt_symbol, {"acknowledged": True}
+            )
             return {
                 "status": order["status"],
                 "filled": order.get("filled", 0.0),

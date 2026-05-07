@@ -206,7 +206,10 @@ class LiveTrader:
         log.info("live_trader.started", symbols=self.config.symbols)
 
         while self._running:
-            tasks = [self._process_symbol(s) for s in self.config.symbols]
+            tasks = [
+                self._process_symbol(s, stagger=i * 0.2)
+                for i, s in enumerate(self.config.symbols)
+            ]
             await asyncio.gather(*tasks)
             # Interruptible sleep — wakes immediately on shutdown
             try:
@@ -214,9 +217,11 @@ class LiveTrader:
             except asyncio.TimeoutError:
                 pass
 
-    async def _process_symbol(self, symbol: str) -> None:
+    async def _process_symbol(self, symbol: str, stagger: float = 0.0) -> None:
         """Process one symbol: wait for candle, update, signal."""
         try:
+            if stagger > 0:
+                await asyncio.sleep(stagger)
             series = await self._candle_feed.wait_for_candle(
                 symbol, shutdown_event=getattr(self, "_shutdown_event", None),
             )

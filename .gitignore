@@ -5,3 +5,24 @@
 .beads-credential-key
 *.pyc
 oc
+
+# Rust build artifacts
+pypsik-live/target/
+pypsik-live/Cargo.lock
+
+# Session / temp files
+.tmp/
+
+# Environment
+.env
+
+# Runtime data
+data/
+*.log
+bybit_trade.txt
+
+# Results (generated)
+results/
+
+# Skills lock
+skills-lock.json

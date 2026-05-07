@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Comma-separated symbols (default from config)",
     )
-    parser.add_argument("--capital", type=float, default=10000.0, help="Initial capital")
+    parser.add_argument("--capital", type=float, default=100.0, help="Initial capital")
     parser.add_argument("--risk", type=float, default=0.03, help="Risk per trade (fraction)")
     parser.add_argument("--max-positions", type=int, default=2, help="Max positions per symbol")
     parser.add_argument(

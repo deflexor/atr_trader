@@ -32,6 +32,7 @@ pub struct OrderResponse {
 }
 
 /// Bybit V5 REST API client.
+#[derive(Clone)]
 pub struct ExchangeClient {
     http: Client,
     api_key: String,

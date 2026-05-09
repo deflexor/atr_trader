@@ -57,6 +57,22 @@ class DataStore:
             CREATE INDEX IF NOT EXISTS idx_candle_period
             ON candles(timestamp)
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS funding_rates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                funding_rate REAL NOT NULL,
+                funding_datetime TEXT,
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(symbol, exchange, timestamp)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_funding_lookup
+            ON funding_rates(symbol, exchange, timestamp)
+        """)
         conn.commit()
         conn.close()
 
@@ -214,6 +230,87 @@ class DataStore:
         row = cursor.fetchone()
         conn.close()
         return row[0], row[1]
+
+    def save_funding_rates(self, rows: list[dict]) -> int:
+        """Save funding-rate rows to the database.
+
+        Expected row keys: symbol, exchange, timestamp, funding_rate,
+        optional funding_datetime.
+        """
+        if not rows:
+            return 0
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        values = [
+            (
+                row["symbol"],
+                row.get("exchange", "bybit"),
+                int(row["timestamp"]),
+                float(row["funding_rate"]),
+                row.get("funding_datetime"),
+            )
+            for row in rows
+        ]
+
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            cursor.executemany(
+                """
+                INSERT OR IGNORE INTO funding_rates
+                (symbol, exchange, timestamp, funding_rate, funding_datetime)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            conn.commit()
+            inserted = cursor.rowcount
+        except Exception as e:
+            conn.rollback()
+            logger.debug(f"Funding insert failed: {e}")
+            inserted = 0
+        conn.close()
+        return inserted
+
+    def get_funding_rates(
+        self,
+        symbol: str,
+        exchange: str,
+        start_timestamp: Optional[int] = None,
+        end_timestamp: Optional[int] = None,
+    ) -> list[dict]:
+        """Retrieve funding rates sorted oldest-first."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        query = "SELECT * FROM funding_rates WHERE symbol = ? AND exchange = ?"
+        params = [symbol, exchange]
+        if start_timestamp:
+            query += " AND timestamp >= ?"
+            params.append(start_timestamp)
+        if end_timestamp:
+            query += " AND timestamp <= ?"
+            params.append(end_timestamp)
+        query += " ORDER BY timestamp ASC"
+        cursor.execute(query, params)
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    def get_funding_rate_count(self, symbol: str, exchange: str) -> int:
+        """Get count of funding-rate rows for a symbol."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM funding_rates
+            WHERE symbol = ? AND exchange = ?
+            """,
+            (symbol, exchange),
+        )
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
 
     def export_to_csv(
         self,

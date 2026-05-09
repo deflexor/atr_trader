@@ -15,6 +15,16 @@ pub struct StateManager {
 }
 
 impl StateManager {
+    /// Create a placeholder state manager (not connected to a real DB).
+    /// Used during PairsTrader::new() before start() initializes the real DB.
+    pub fn new_placeholder() -> Self {
+        // Create an in-memory SQLite DB as placeholder
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        Self {
+            db: Arc::new(Mutex::new(conn)),
+        }
+    }
+
     /// Create and initialize the database.
     pub async fn init(db_path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let path = db_path.to_string();

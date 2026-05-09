@@ -15,7 +15,9 @@ use tokio::signal;
 use tokio::sync::broadcast;
 use tracing_subscriber::{fmt, EnvFilter};
 
+use live::pairs_trader::{PairsTrader, PairsTraderConfig};
 use live::trader::{LiveTrader, LiveTradingConfig};
+use strategy::pairs_strategy::PairsConfig;
 
 /// PyPSiK live trading (USDT perpetuals)
 #[derive(Parser, Debug)]
@@ -48,6 +50,10 @@ struct Cli {
     /// Market type: perp or spot
     #[arg(long, default_value = "perp")]
     market_type: String,
+
+    /// Run pairs trading mode (SHIB/UNI daily)
+    #[arg(long)]
+    pairs: bool,
 }
 
 #[tokio::main]
@@ -91,29 +97,12 @@ async fn main() {
             ]
         });
 
-    let config = LiveTradingConfig {
-        api_key,
-        api_secret,
-        testnet: cli.testnet,
-        market_type: cli.market_type,
-        leverage: cli.leverage,
-        symbols,
-        initial_capital: cli.capital,
-        risk_per_trade: cli.risk,
-        max_positions: cli.max_positions,
-        ..Default::default()
-    };
-
-    tracing::info!(
-        symbols = ?config.symbols,
-        capital = config.initial_capital,
-        risk = config.risk_per_trade,
-        max_positions = config.max_positions,
-        market_type = %config.market_type,
-        leverage = config.leverage,
-        testnet = config.testnet,
-        "live_trading.starting"
-    );
+    let testnet = cli.testnet;
+    let market_type = cli.market_type.clone();
+    let leverage = cli.leverage;
+    let capital = cli.capital;
+    let risk = cli.risk;
+    let max_positions = cli.max_positions;
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
@@ -126,16 +115,67 @@ async fn main() {
         tracing::info!("ctrl_c_received");
     });
 
-    let mut trader = LiveTrader::new(config);
+    if cli.pairs {
+        // ── Pairs trading mode (SHIB/UNI daily) ──
+        let pairs_cfg = PairsConfig::shib_uni(capital);
+        let trader_cfg = PairsTraderConfig {
+            api_key: api_key.clone(),
+            api_secret: api_secret.clone(),
+            testnet,
+            market_type,
+            leverage,
+            initial_capital: capital,
+            pairs_config: pairs_cfg,
+            ..Default::default()
+        };
 
-    match trader.start().await {
-        Ok(()) => {
-            trader.run(shutdown_rx).await;
+        let mut trader = PairsTrader::new(trader_cfg);
+        match trader.start().await {
+            Ok(()) => {
+                trader.run(shutdown_rx).await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "pairs_trader_start_failed");
+            }
         }
-        Err(e) => {
-            tracing::error!(error = %e, "trader_crashed");
+        trader.stop().await;
+    } else {
+        // ── Enhanced multi-symbol mode ──
+        let config = LiveTradingConfig {
+            api_key,
+            api_secret,
+            testnet,
+            market_type,
+            leverage,
+            symbols,
+            initial_capital: capital,
+            risk_per_trade: risk,
+            max_positions,
+            ..Default::default()
+        };
+
+        tracing::info!(
+            symbols = ?config.symbols,
+            capital = config.initial_capital,
+            risk = config.risk_per_trade,
+            max_positions = config.max_positions,
+            market_type = %config.market_type,
+            leverage = config.leverage,
+            testnet = config.testnet,
+            "live_trading.starting"
+        );
+
+        let mut trader = LiveTrader::new(config);
+
+        match trader.start().await {
+            Ok(()) => {
+                trader.run(shutdown_rx).await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "trader_crashed");
+            }
         }
+
+        trader.stop().await;
     }
-
-    trader.stop().await;
 }

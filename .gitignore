@@ -1,0 +1,14 @@
+/target/
+data/
+*.db
+*.db-journal
+.env
+*.sweep_*
+*.sweep_bak
+*.sweep_safe
+*.tmp
+sweeps/
+docs/
+tests/
+ISSUES.md
+V2_ROADMAP.md

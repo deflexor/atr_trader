@@ -1,0 +1,58 @@
+[package]
+name = "atr-trader-v2"
+version = "0.1.0"
+edition = "2021"
+description = "DEX crypto trading bot with news sentiment analysis"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Storage
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "sqlite-bundled", "tls-rustls-ring", "migrate", "chrono"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies", "socks"] }
+
+# Error handling
+anyhow = "1"
+bs58 = "0.5"
+base64 = "0.22"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Unique IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Decimal math
+rust_decimal = "1"
+
+# Config file parsing
+toml = "0.8"
+
+# Async trait methods
+async-trait = "0.1"
+
+# RSS feed parsing
+rss = "2"
+# Atom feed parsing (Reddit uses Atom)
+# atom_syndication is a transitive dep of rss, but we need it explicitly
+atom_syndication = "0.12"
+
+# URL hashing for dedup
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"

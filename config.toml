@@ -1,0 +1,92 @@
+data_dir = "./data"
+log_level = "info"
+
+[market_data]
+symbols = ["BTCUSDC", "ETHUSDC", "SOLUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "DOGEUSDC", "AVAXUSDC", "DOTUSDC", "LINKUSDC", "UNIUSDC", "LTCUSDC", "ATOMUSDC", "TRXUSDC", "NEARUSDC", "APTUSDC", "ALGOUSDC", "VETUSDC"]
+timeframe = "5m"
+source = "coingecko"
+
+[news]
+sources = ["coindesk", "cointelegraph", "decrypt", "utoday", "bitcoinmag"]
+poll_interval_secs = 21600
+
+[strategy]
+risk_per_trade = 0.015
+max_positions = 2
+cooldown_candles = 96
+enabled_signals = ["breakout", "mean_reversion", "trend", "vwap", "divergence", "news_sentiment"]
+min_risk_reward = 1.5
+stop_loss_pct = 0.02
+take_profit_pct = 0.04
+trailing_activation_atr = 2.5
+trailing_distance_atr = 2.5
+use_trailing_stop = true
+
+[signals]
+rsi_period = 14
+rsi_oversold = 35
+rsi_overbought = 65
+mean_reversion_strength = 0.5
+bollinger_required = false
+bollinger_std = 2.0
+bollinger_period = 20
+breakout_lookback = 20
+breakout_volume_mult = 1.0
+breakout_strength = 0.6
+ema_fast = 9
+ema_slow = 21
+macd_fast = 12
+macd_slow = 26
+macd_signal = 9
+min_agreement = 3
+trend_strength = 0.7
+vwap_period = 100
+vwap_deviation_threshold = 0.02
+vwap_enabled = true
+divergence_lookback = 20
+divergence_rsi_threshold = 10.0
+divergence_enabled = true
+news_lookback_hours = 24
+min_atr_value = 0.05
+use_trend_filter = true
+trend_ema_period = 200
+htf_enabled = true
+htf_ema_period = 50
+htf_allow_both = true
+htf_counter_trend_min_strength = 0.8
+
+[risk]
+use_composite_risk = true
+total_drawdown_budget = 0.05
+per_trade_drawdown_budget = 0.02
+
+[funding_arb]
+# Live trading exchange: "bybit" or "binance"
+exchange = "bybit"
+# Number of simultaneous carry positions
+max_positions = 3
+# Rebalance every N days
+rebalance_days = 14
+# Transaction cost in bps (5 = maker rebate, 10 = taker)
+cost_bps = 5.0
+# Minimum funding rate per 8h (0.00005 = 0.005% = ~5.5% APR)
+min_rate_threshold = 0.00005
+# Max portfolio drawdown before halting
+max_drawdown_pct = 0.15
+
+# API keys for live trading (set via env vars)
+[funding_arb.credentials]
+# BYBIT_API_KEY=<your_key>
+# BYBIT_API_SECRET=<your_secret>
+
+[dex]
+dex = "jupiter"
+rpc_url = "https://api.mainnet-beta.solana.com"
+slippage_bps = 50
+
+[live]
+enabled = false
+dry_run = true
+initial_capital = 10000.0
+symbols = ["SOLUSDC"]
+timeframe = "5m"
